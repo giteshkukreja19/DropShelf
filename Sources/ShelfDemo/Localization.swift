@@ -95,7 +95,7 @@ enum LanguagePreference {
     private static var cachedBundle: Bundle?
 
     private static func resolveActiveBundle() -> Bundle {
-        let module = Bundle.module
+        let module = Bundle.main.url(forResource: "ShelfDemo_ShelfDemo", withExtension: "bundle").flatMap { Bundle(url: $0) } ?? (Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module)
         let code: String
         switch current {
         case .system:

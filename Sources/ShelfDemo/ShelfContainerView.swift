@@ -48,6 +48,7 @@ struct ShelfContainerView: View {
     var onResize: (_ expanded: Bool) -> Void = { _ in }
     var onDockChanged: (_ docked: Bool) -> Void = { _ in }
 
+    @AppStorage("shelf.activation") private var activation: ShelfActivation = .oneSecond
     @Namespace private var ns
     @State private var isExpanded = false
     @State private var isDocked = false
@@ -139,6 +140,9 @@ struct ShelfContainerView: View {
                 toggle(to: false)
             }
             if newCount > 0 { hasEverHadItems = true }
+            if activation == .dragOnly, newCount > 0, !isDocked, !isExpanded {
+                toggle(to: true)
+            }
         }
         .onChange(of: dropTargeted) { newValue in
             manager.setDropTargeted(shelfID: shelfID, newValue)

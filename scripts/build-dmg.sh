@@ -64,6 +64,17 @@ if [ -d "Sources/${BIN_NAME}/Resources" ]; then
   cp -R "Sources/${BIN_NAME}/Resources/." "${APP_DIR}/Contents/Resources/" 2>/dev/null || true
 fi
 
+# Keep SwiftPM resources in the conventional signed app resource directory.
+echo "==> Embedding SwiftPM resource bundle"
+BUILD_DIR="$(swift build -c release --show-bin-path)"
+RESOURCE_BUNDLE="${BUILD_DIR}/${BIN_NAME}_${BIN_NAME}.bundle"
+if [ ! -d "${RESOURCE_BUNDLE}" ]; then
+  echo "ERROR: SwiftPM resource bundle missing: ${RESOURCE_BUNDLE}"
+  exit 1
+fi
+# Also provide the conventional macOS resource location for SDK variants.
+cp -R "${RESOURCE_BUNDLE}" "${APP_DIR}/Contents/Resources/"
+
 echo "==> Embedding Sparkle.framework"
 # The Sparkle xcframework artifact ships in .build/artifacts/ after `swift
 # build` resolves the SPM dependency. Prefer the xcframework's macos slice
@@ -117,7 +128,7 @@ codesign --force --deep --sign - "${SPARKLE_FX}/Versions/Current/Updater.app" 2>
 codesign --force --deep --sign - "${SPARKLE_FX}/Versions/Current/Autoupdate" 2>/dev/null || true
 codesign --force --deep --sign - "${SPARKLE_FX}"
 codesign --force --deep --sign - "${APP_DIR}"
-codesign --verify --verbose=2 "${APP_DIR}" || true
+codesign --verify --deep --strict --verbose=2 "${APP_DIR}"
 
 echo "==> Building DMG"
 mkdir -p "${DMG_ROOT}"
@@ -126,6 +137,7 @@ ln -sfn /Applications "${DMG_ROOT}/Applications"
 
 rm -f "${DMG_PATH}"
 hdiutil create -volname "${APP_NAME}" -srcfolder "${DMG_ROOT}" -ov -format UDZO "${DMG_PATH}"
+rm -rf "${DMG_ROOT}"
 
 echo
 echo "Done. Built: ${DMG_PATH}"

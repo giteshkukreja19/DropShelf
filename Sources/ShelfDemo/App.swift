@@ -205,6 +205,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
+        shakeDetector.shouldSuppress = { [weak self] in self?.manager.isDragging == true }
+        shakeDetector.shouldSuppressAutomatic = { [weak self] in
+            self?.panels.values.contains(where: { $0.isVisible }) ?? false
+        }
         shakeDetector.onShake = { [weak self] in self?.handleShake() }
         shakeDetector.start()
 
@@ -311,7 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Status menu
 
     nonisolated func menuNeedsUpdate(_ menu: NSMenu) {
-        Task { @MainActor in
+        MainActor.assumeIsolated {
             self.rebuildStatusMenu(menu)
         }
     }
@@ -680,6 +684,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Shake
 
     private func handleShake() {
+        guard !manager.isDragging, !DragInitiatorView.hasActiveDrag else { return }
         // Ignore further shakes while a shake-created shelf is still pending.
         // Otherwise rapid shakes pile up panels and only the latest one's
         // release watcher survives, leaving earlier empties on screen.

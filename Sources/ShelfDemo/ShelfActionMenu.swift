@@ -32,10 +32,14 @@ private final class ShelfActionTargets: NSObject {
         self.shelfID = shelfID
     }
 
-    private var items: [ShelfItem] { manager.items(of: shelfID) }
+    fileprivate var items: [ShelfItem] { manager.items(of: shelfID) }
     private var urls: [URL] {
         items.compactMap { $0.fileURL }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    @objc func smartAction(_ sender: NSMenuItem) {
+        SmartFileActions.run(sender, items: items, manager: manager, shelfID: shelfID)
     }
 
     @objc func openWith(_ sender: NSMenuItem) {
@@ -667,6 +671,7 @@ enum ShelfActionMenuBuilder {
         hasFiles: Bool
     ) -> NSMenu {
         let menu = NSMenu()
+        SmartFileActions.append(to: menu, items: targets.items, target: targets, selector: #selector(ShelfActionTargets.smartAction(_:)))
 
         menu.addItem(makeItem(
             title: L("Get Info"),

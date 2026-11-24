@@ -21,7 +21,52 @@ enum ShelfExpiry: Int, CaseIterable, Identifiable {
     }
 }
 
+enum ShelfActivation: String, CaseIterable, Identifiable {
+    case instant, oneSecond, twoSeconds, dragOnly, shakeOnly
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .instant: return "Instant hover"
+        case .oneSecond: return "Hover for 1 second"
+        case .twoSeconds: return "Hover for 2 seconds"
+        case .dragOnly: return "While dragging files only"
+        case .shakeOnly: return "Shake / click only"
+        }
+    }
+    var delay: Double? {
+        switch self {
+        case .instant: return 0
+        case .oneSecond: return 1
+        case .twoSeconds: return 2
+        default: return nil
+        }
+    }
+}
+
+enum ShelfSummon: String, CaseIterable, Identifiable {
+    case instant, oneSecond, twoSeconds, shakeOnly
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .instant: return "Immediately while dragging a file"
+        case .oneSecond: return "After dragging for 1 second"
+        case .twoSeconds: return "After dragging for 2 seconds"
+        case .shakeOnly: return "Shake only"
+        }
+    }
+    var delay: Double? {
+        switch self {
+        case .instant: return 0
+        case .oneSecond: return 1
+        case .twoSeconds: return 2
+        case .shakeOnly: return nil
+        }
+    }
+}
+
 struct SettingsView: View {
+    @AppStorage("shelf.summon") private var summon: ShelfSummon = .instant
+    @AppStorage("shelf.activation") private var activation: ShelfActivation = .oneSecond
     @AppStorage("shelf.expiryDays") private var expiryDays: Int = ShelfExpiry.tenDays.rawValue
     @AppStorage("shelf.autoParkTopRight") private var autoParkTopRight: Bool = false
     @AppStorage("shelf.closeOnOutsideClick") private var closeOnOutsideClick: Bool = false
@@ -35,10 +80,19 @@ struct SettingsView: View {
     @State private var pickedLanguage: AppLanguage = LanguagePreference.current
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 18) {
             Text(L("Settings"))
                 .font(.system(size: 17, weight: .semibold))
 
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Show new shelf").font(.system(size: 13, weight: .medium))
+                Picker("", selection: $summon) {
+                    ForEach(ShelfSummon.allCases) { mode in Text(mode.label).tag(mode) }
+                }.labelsHidden().pickerStyle(.menu)
+                Text("Drag a file from Finder or the desktop to summon a new shelf. Shake is always available.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
             VStack(alignment: .leading, spacing: 6) {
                 Text(L("Auto-delete shelves"))
                     .font(.system(size: 13, weight: .medium))
@@ -62,6 +116,20 @@ struct SettingsView: View {
             }
 
             Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Expand existing shelf").font(.system(size: 13, weight: .medium))
+                Picker("", selection: $activation) {
+                    ForEach(ShelfActivation.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                Text("Hover over the filename or file-count button to expand. Click that button or double-click the file stack to expand. Drag files directly from the stack.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Toggle(L("Park new shelves at the top-right corner"), isOn: $autoParkTopRight)
@@ -140,7 +208,8 @@ struct SettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 380, alignment: .leading)
+        }
+        .frame(width: 400, height: 650, alignment: .leading)
         .onAppear {
             launchAtLogin = LaunchAtLoginManager.isEnabled
             pickedLanguage = LanguagePreference.current

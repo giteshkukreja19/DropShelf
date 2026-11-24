@@ -6,3 +6,13 @@ xcuserdata/
 .swiftpm/
 Packages/
 scripts/.sparkle-public-key
+
+# Local build files
+.build/
+dist/
+*.dmg
+*.log
+*.backup
+.DS_Store
+.env*
+*private*key*

@@ -10,6 +10,7 @@ final class FloatingPanel<Content: View>: NSPanel {
             defer: false
         )
 
+        acceptsMouseMovedEvents = true
         isFloatingPanel = true
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]

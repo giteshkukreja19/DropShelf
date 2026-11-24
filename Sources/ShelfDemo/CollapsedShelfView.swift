@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct CollapsedShelfView: View {
@@ -17,7 +18,22 @@ struct CollapsedShelfView: View {
     var onDragStart: () -> Void = {}
     var onDragEnd: () -> Void = {}
 
+    @AppStorage("shelf.activation") private var activation: ShelfActivation = .oneSecond
     @State private var stackHovering = false
+    @State private var hoverTask: Task<Void, Never>?
+
+    private func scheduleHover(_ inside: Bool) {
+        stackHovering = inside
+        hoverTask?.cancel()
+        hoverTask = nil
+        guard inside, !isDragging, let delay = activation.delay else { return }
+        hoverTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, stackHovering, !manager.isDragging, !DragInitiatorView.hasActiveDrag,
+                  NSEvent.pressedMouseButtons == 0 else { return }
+            onOpenDocuments()
+        }
+    }
 
     private var shelf: Shelf? { manager.shelf(id: shelfID) }
 
@@ -52,11 +68,15 @@ struct CollapsedShelfView: View {
                     manager: manager,
                     shelfID: shelfID,
                     onDragStart: onDragStart,
-                    onDragEnd: onDragEnd
+                    onDragEnd: onDragEnd,
+                    onOpen: onOpenDocuments
                 )
                 .scaleEffect(stackHovering ? 1.03 : 1.0)
                 .animation(.spring(response: 0.32, dampingFraction: 0.72), value: stackHovering)
-                .onHover { stackHovering = $0 }
+                
+                .onDisappear { hoverTask?.cancel() }
+                .onChange(of: activation) { _ in scheduleHover(stackHovering) }
+                .onChange(of: isDragging) { dragging in if dragging { scheduleHover(false) } }
                 .opacity(isDragging ? 0 : 1)
                 .scaleEffect(isDragging ? 0.9 : 1)
                 .animation(.easeOut(duration: 0.2), value: isDragging)
@@ -81,6 +101,8 @@ struct CollapsedShelfView: View {
                     Spacer(minLength: 0)
 
                     DocumentsPill(title: pillTitle, action: onOpenDocuments)
+                        .onHover { scheduleHover($0) }
+                        .onDisappear { hoverTask?.cancel() }
                 }
 
                 GrabHandle(onTap: onDock)
@@ -98,6 +120,8 @@ private struct StackedDocumentPreview: View {
     let shelfID: UUID
     var onDragStart: () -> Void = {}
     var onDragEnd: () -> Void = {}
+
+    var onOpen: () -> Void = {}
 
     private struct Layer {
         let rotation: Double
@@ -144,7 +168,8 @@ private struct StackedDocumentPreview: View {
                                             manager: manager,
                                             shelfID: shelfID
                                         )
-                                    }
+                                    },
+                                    onDoubleClick: { onOpen() }
                                 )
                             }
                         }

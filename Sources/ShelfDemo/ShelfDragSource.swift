@@ -53,6 +53,7 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
 
     private var mouseDownPoint: NSPoint?
     private var sessionActive = false
+    static private(set) var hasActiveDrag = false
     private let dragThreshold: CGFloat = 4
 
     private static let promiseQueue: OperationQueue = {
@@ -160,6 +161,7 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
         }
 
         sessionActive = true
+        Self.hasActiveDrag = true
         onStart?()
         let session = beginDraggingSession(with: draggingItems, event: event, source: self)
         session.animatesToStartingPositionsOnCancelOrFail = true
@@ -218,6 +220,7 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
         operation: NSDragOperation
     ) {
         sessionActive = false
+        Self.hasActiveDrag = false
         onEnd?()
     }
 

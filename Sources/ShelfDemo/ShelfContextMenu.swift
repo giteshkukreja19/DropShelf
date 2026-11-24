@@ -29,6 +29,11 @@ final class ShelfItemActions: NSObject {
         self.ocrService = ocrService
     }
 
+    @objc func smartAction(_ sender: NSMenuItem) {
+        guard let manager else { return }
+        SmartFileActions.run(sender, items: selectedItems, manager: manager, shelfID: shelfID)
+    }
+
     @objc func openWith(_ sender: NSMenuItem) {
         guard
             let appURL = sender.representedObject as? URL,
@@ -455,6 +460,7 @@ enum ShelfContextMenu {
         isImage: Bool
     ) -> NSMenu {
         let menu = NSMenu()
+        SmartFileActions.append(to: menu, items: actions.selectedItems, target: actions, selector: #selector(ShelfItemActions.smartAction(_:)))
 
         if let submenu = ConversionMenu.makeSubmenu(
             items: actions.selectedItems,
@@ -489,7 +495,7 @@ enum ShelfContextMenu {
             // No separator — sits in the same logical group as Convert to ▶.
         }
 
-        if isImage {
+        if isImage && actions.selectedItems.count == 1 {
             menu.addItem(sectionHeader(L("Image Actions")))
 
             addItem(to: menu, title: L("Resize…"),

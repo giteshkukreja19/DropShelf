@@ -10,6 +10,8 @@ import QuartzCore
 /// Security → Accessibility.
 final class ShakeDetector {
     var onShake: (() -> Void)?
+    var shouldSuppress: (() -> Bool)?
+    var shouldSuppressAutomatic: (() -> Bool)?
 
     private var globalMonitor: Any?
     private var localMonitor: Any?
@@ -20,6 +22,9 @@ final class ShakeDetector {
     }
 
     private var samples: [Sample] = []
+    private var dragSummoned = false
+    private var dragTimer: Timer?
+    private var dragStarted: CFTimeInterval?
     private var lastShakeTime: CFTimeInterval = 0
 
     // Tunables
@@ -38,7 +43,7 @@ final class ShakeDetector {
         localMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDragged, .leftMouseUp]
         ) { [weak self] event in
-            self?.handle(event)
+            if event.type == .leftMouseUp { self?.handle(event) }
             return event
         }
     }
@@ -48,29 +53,69 @@ final class ShakeDetector {
         if let m = localMonitor { NSEvent.removeMonitor(m) }
         globalMonitor = nil
         localMonitor = nil
+        dragTimer?.invalidate()
+        dragTimer = nil
+        dragStarted = nil
         samples.removeAll()
+        dragSummoned = false
     }
 
     private func handle(_ event: NSEvent) {
         switch event.type {
         case .leftMouseUp:
+            dragTimer?.invalidate()
+            dragTimer = nil
+            dragStarted = nil
             samples.removeAll()
+            dragSummoned = false
         case .leftMouseDragged:
+            guard shouldSuppress?() != true, !DragInitiatorView.hasActiveDrag else {
+                dragSummoned = true
+                return
+            }
+            if dragStarted == nil {
+                dragStarted = CACurrentMediaTime()
+                let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+                    self?.checkFileDrag()
+                }
+                dragTimer = timer
+                RunLoop.main.add(timer, forMode: .common)
+            }
+            checkFileDrag()
+            if dragSummoned { return }
             let now = CACurrentMediaTime()
             let x = NSEvent.mouseLocation.x
             samples.append(Sample(time: now, x: x))
             samples.removeAll { now - $0.time > window }
             if detectShake() {
                 guard now - lastShakeTime > cooldown else { return }
+                dragSummoned = true
                 lastShakeTime = now
                 samples.removeAll()
                 DispatchQueue.main.async { [weak self] in
-                    self?.onShake?()
+                    guard let self, self.shouldSuppress?() != true, !DragInitiatorView.hasActiveDrag, NSEvent.pressedMouseButtons & 1 != 0 else { return }
+                    self.onShake?()
                 }
             }
         default:
             break
         }
+    }
+
+    private func checkFileDrag() {
+        guard NSEvent.pressedMouseButtons & 1 != 0 else {
+            dragTimer?.invalidate(); dragTimer = nil; dragStarted = nil; dragSummoned = false
+            return
+        }
+        guard shouldSuppress?() != true, !DragInitiatorView.hasActiveDrag,
+              shouldSuppressAutomatic?() != true,
+              !dragSummoned, let start = dragStarted,
+              let delay = (ShelfSummon(rawValue: UserDefaults.standard.string(forKey: "shelf.summon") ?? "instant") ?? .instant).delay,
+              CACurrentMediaTime() - start >= delay,
+              NSPasteboard(name: .drag).canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) else { return }
+        dragSummoned = true
+        DispatchQueue.main.async { [weak self] in guard let self, self.shouldSuppress?() != true, !DragInitiatorView.hasActiveDrag, NSEvent.pressedMouseButtons & 1 != 0 else { return }
+                    self.onShake?() }
     }
 
     private func detectShake() -> Bool {

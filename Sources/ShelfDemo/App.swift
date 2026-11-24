@@ -868,7 +868,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let panel = panels[shelfID] else { return }
 
         if docked {
-            preDockFrames[shelfID] = panel.frame
+            let frame = panel.frame
+            let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? frame
+            preDockFrames[shelfID] = NSRect(x: max(visible.minX, min(frame.minX, visible.maxX - frame.width)),
+                                           y: max(visible.minY, min(frame.minY, visible.maxY - frame.height)),
+                                           width: frame.width, height: frame.height)
             dockedShelfIDs.insert(shelfID)
             installWindowMoveObserverIfNeeded()
 

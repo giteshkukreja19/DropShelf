@@ -33,17 +33,19 @@ final class ShakeDetector {
     private let minTravelPerLeg: CGFloat = 12
     private let cooldown: CFTimeInterval = 0.8
 
+    private var baseline: Int?
+    private var gesture = 0
+    private var downPoint: NSPoint?
+
     func start() {
         stop()
         globalMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDragged, .leftMouseUp]
-        ) { [weak self] event in
-            self?.handle(event)
-        }
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+        ) { [weak self] event in self?.handle(event) }
         localMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDragged, .leftMouseUp]
+            matching: [.leftMouseDown, .leftMouseUp]
         ) { [weak self] event in
-            if event.type == .leftMouseUp { self?.handle(event) }
+            self?.resetGesture()
             return event
         }
     }
@@ -53,6 +55,13 @@ final class ShakeDetector {
         if let m = localMonitor { NSEvent.removeMonitor(m) }
         globalMonitor = nil
         localMonitor = nil
+        resetGesture()
+    }
+
+    private func resetGesture() {
+        gesture += 1
+        baseline = nil
+        downPoint = nil
         dragTimer?.invalidate()
         dragTimer = nil
         dragStarted = nil
@@ -62,60 +71,57 @@ final class ShakeDetector {
 
     private func handle(_ event: NSEvent) {
         switch event.type {
+        case .leftMouseDown:
+            resetGesture()
+            baseline = NSPasteboard(name: .drag).changeCount
+            downPoint = NSEvent.mouseLocation
+            let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+                self?.checkFileDrag()
+            }
+            dragTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
         case .leftMouseUp:
-            dragTimer?.invalidate()
-            dragTimer = nil
-            dragStarted = nil
-            samples.removeAll()
-            dragSummoned = false
+            resetGesture()
         case .leftMouseDragged:
-            guard shouldSuppress?() != true, !DragInitiatorView.hasActiveDrag else {
-                dragSummoned = true
-                return
-            }
-            if dragStarted == nil {
-                dragStarted = CACurrentMediaTime()
-                let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-                    self?.checkFileDrag()
-                }
-                dragTimer = timer
-                RunLoop.main.add(timer, forMode: .common)
-            }
             checkFileDrag()
-            if dragSummoned { return }
-            let now = CACurrentMediaTime()
-            let x = NSEvent.mouseLocation.x
-            samples.append(Sample(time: now, x: x))
-            samples.removeAll { now - $0.time > window }
-            if detectShake() {
-                guard now - lastShakeTime > cooldown else { return }
-                dragSummoned = true
-                lastShakeTime = now
-                samples.removeAll()
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.shouldSuppress?() != true, !DragInitiatorView.hasActiveDrag, NSEvent.pressedMouseButtons & 1 != 0 else { return }
-                    self.onShake?()
-                }
-            }
-        default:
-            break
+        default: break
         }
     }
 
+    private func validFileDrag() -> Bool {
+        guard let baseline, let downPoint,
+              NSEvent.pressedMouseButtons & 1 != 0,
+              shouldSuppress?() != true, shouldSuppressAutomatic?() != true,
+              !DragInitiatorView.hasActiveDrag else { return false }
+        let point = NSEvent.mouseLocation
+        guard hypot(point.x - downPoint.x, point.y - downPoint.y) > 4 else { return false }
+        let board = NSPasteboard(name: .drag)
+        return board.changeCount != baseline && board.canReadObject(
+            forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+    }
+
     private func checkFileDrag() {
-        guard NSEvent.pressedMouseButtons & 1 != 0 else {
-            dragTimer?.invalidate(); dragTimer = nil; dragStarted = nil; dragSummoned = false
+        guard NSEvent.pressedMouseButtons & 1 != 0 else { resetGesture(); return }
+        guard !dragSummoned, validFileDrag() else {
+            dragStarted = nil
+            samples.removeAll()
             return
         }
-        guard shouldSuppress?() != true, !DragInitiatorView.hasActiveDrag,
-              shouldSuppressAutomatic?() != true,
-              !dragSummoned, let start = dragStarted,
-              let delay = (ShelfSummon(rawValue: UserDefaults.standard.string(forKey: "shelf.summon") ?? "instant") ?? .instant).delay,
-              CACurrentMediaTime() - start >= delay,
-              NSPasteboard(name: .drag).canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) else { return }
+        let now = CACurrentMediaTime()
+        if dragStarted == nil { dragStarted = now }
+        samples.append(Sample(time: now, x: NSEvent.mouseLocation.x))
+        samples.removeAll { now - $0.time > window }
+        let mode = ShelfSummon(rawValue: UserDefaults.standard.string(forKey: "shelf.summon") ?? "instant") ?? .instant
+        let timed = mode.delay.map { now - (dragStarted ?? now) >= $0 } ?? false
+        let shaken = UserDefaults.standard.object(forKey: "shelf.shakeEnabled") as? Bool ?? true
+        guard timed || (shaken && detectShake() && now - lastShakeTime > cooldown) else { return }
         dragSummoned = true
-        DispatchQueue.main.async { [weak self] in guard let self, self.shouldSuppress?() != true, !DragInitiatorView.hasActiveDrag, NSEvent.pressedMouseButtons & 1 != 0 else { return }
-                    self.onShake?() }
+        lastShakeTime = now
+        let token = gesture
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.gesture == token, self.validFileDrag() else { return }
+            self.onShake?()
+        }
     }
 
     private func detectShake() -> Bool {

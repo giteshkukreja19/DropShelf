@@ -100,12 +100,12 @@ struct CollapsedShelfView: View {
 
                     Spacer(minLength: 0)
 
-                    DocumentsPill(title: pillTitle, action: onOpenDocuments)
+                    DocumentsPill(title: pillTitle, doubleClick: activation == .doubleClick, action: onOpenDocuments)
                         .onHover { scheduleHover($0) }
                         .onDisappear { hoverTask?.cancel() }
                 }
 
-                GrabHandle(onTap: onDock)
+                GrabHandle(onTap: onDock, onEdge: onDock)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .offset(y: -12)
             }
@@ -376,12 +376,13 @@ struct CircularIconButton: View {
 
 private struct DocumentsPill: View {
     let title: String
+    var doubleClick = false
     let action: () -> Void
 
     @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
+        HStack {
             HStack(spacing: 4) {
                 Text(title)
                     .font(.system(size: 11, weight: .medium))
@@ -404,7 +405,10 @@ private struct DocumentsPill: View {
             )
             .scaleEffect(hovering ? 1.03 : 1.0)
         }
-        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .onTapGesture(count: doubleClick ? 2 : 1, perform: action)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { action() }
         .animation(.spring(response: 0.28, dampingFraction: 0.7), value: hovering)
         .onHover { hovering = $0 }
     }
@@ -412,20 +416,22 @@ private struct DocumentsPill: View {
 
 struct GrabHandle: View {
     var onTap: (() -> Void)? = nil
-
+    var onEdge: (() -> Void)? = nil
+    @AppStorage("shelf.handleGlow") private var glow = true
     @State private var hovering = false
 
     var body: some View {
         Capsule(style: .continuous)
-            .fill(Color.white.opacity(hovering ? 0.75 : 0.28))
+            .fill(Color.white.opacity(hovering && glow ? 0.75 : 0.28))
             .frame(width: 40, height: 4)
-            .shadow(color: Color.white.opacity(hovering ? 0.55 : 0),
-                    radius: hovering ? 6 : 0)
+            .shadow(color: Color.white.opacity(hovering && glow ? 0.55 : 0),
+                    radius: hovering && glow ? 6 : 0)
             .padding(.vertical, 10)
             .padding(.horizontal, 16)
             .contentShape(Rectangle())
-            .onHover { hovering = $0 }
-            .onTapGesture { onTap?() }
+            .overlay {
+                ShelfWindowDragHandle(onTap: onTap, onEdge: onEdge, onHover: { hovering = $0 })
+            }
             .animation(.easeOut(duration: 0.15), value: hovering)
     }
 }
@@ -443,6 +449,90 @@ private struct FrontMatchedGeometry: ViewModifier {
             content.matchedGeometryEffect(id: ShelfMatchedGeometry.card, in: namespace)
         } else {
             content
+        }
+    }
+}
+
+
+struct ShelfWindowDragHandle: NSViewRepresentable {
+    var onDoubleTap: (() -> Void)? = nil
+    var onTap: (() -> Void)? = nil
+    var onEdge: (() -> Void)? = nil
+    var onHover: ((Bool) -> Void)? = nil
+    var onMoved: (() -> Void)? = nil
+
+    func makeNSView(context: Context) -> ShelfWindowDragView {
+        let view = ShelfWindowDragView()
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: ShelfWindowDragView, context: Context) {
+        view.onTap = onTap
+        view.onDoubleTap = onDoubleTap
+        view.onEdge = onEdge
+        view.onHover = onHover
+        view.onMoved = onMoved
+    }
+}
+
+final class ShelfWindowDragView: NSView {
+    var onDoubleTap: (() -> Void)?
+    var onTap: (() -> Void)?
+    var onEdge: (() -> Void)?
+    var onHover: ((Bool) -> Void)?
+    var onMoved: (() -> Void)?
+    private var tracking: NSTrackingArea?
+    private var startMouse: NSPoint?
+    private var startOrigin: NSPoint?
+    private var moved = false
+
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, let parent = superview else { return nil }
+        return bounds.contains(convert(point, from: parent)) ? self : nil
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+    }
+    override func mouseEntered(with event: NSEvent) { onHover?(true) }
+    override func mouseExited(with event: NSEvent) { onHover?(false) }
+    override func mouseDown(with event: NSEvent) {
+        startMouse = NSEvent.mouseLocation
+        startOrigin = window?.frame.origin
+        moved = false
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard let startMouse, let startOrigin, let window else { return }
+        let point = NSEvent.mouseLocation
+        let dx = point.x - startMouse.x, dy = point.y - startMouse.y
+        guard moved || hypot(dx, dy) > 3 else { return }
+        moved = true
+        window.setFrameOrigin(NSPoint(x: startOrigin.x + dx, y: startOrigin.y + dy))
+    }
+    override func mouseUp(with event: NSEvent) {
+        guard startMouse != nil else { return }
+        let didMove = moved
+        startMouse = nil; startOrigin = nil; moved = false
+        guard didMove else {
+            if event.clickCount == 2, let onDoubleTap {
+                onDoubleTap()
+            } else {
+                onTap?()
+            }
+            return
+        }
+        if let onMoved { onMoved(); return }
+        let enabled = UserDefaults.standard.object(forKey: "shelf.edgeDock") as? Bool ?? true
+        let point = NSEvent.mouseLocation
+        if enabled, let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? window?.screen,
+           point.x >= screen.visibleFrame.maxX - 28 {
+            onEdge?()
         }
     }
 }

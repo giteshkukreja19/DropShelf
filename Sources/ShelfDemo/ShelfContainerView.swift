@@ -1,3 +1,5 @@
+import AppKit
+import Combine
 import CryptoKit
 import QuickLookThumbnailing
 import SwiftUI
@@ -49,6 +51,12 @@ struct ShelfContainerView: View {
     var onDockChanged: (_ docked: Bool) -> Void = { _ in }
 
     @AppStorage("shelf.activation") private var activation: ShelfActivation = .oneSecond
+    @AppStorage("shelf.idleCollapseSeconds") private var idleCollapseSeconds = 0
+    @AppStorage("shelf.idleDockSeconds") private var idleDockSeconds = 0
+    @State private var idleSince = ProcessInfo.processInfo.systemUptime
+    @State private var lastIdleTick = ProcessInfo.processInfo.systemUptime
+    @State private var shelfHovered = false
+    private let idleTimer = Timer.publish(every: 0.25, on: .main, in: .default).autoconnect()
     @Namespace private var ns
     @State private var isExpanded = false
     @State private var isDocked = false
@@ -120,6 +128,16 @@ struct ShelfContainerView: View {
                 onDrop: handleDrop
             )
         )
+        .onHover { inside in
+            shelfHovered = inside
+            resetIdleClock()
+        }
+        .onReceive(idleTimer) { _ in checkIdleShelf() }
+        .onChange(of: isExpanded) { _ in resetIdleClock() }
+        .onChange(of: isDocked) { _ in resetIdleClock() }
+        .onChange(of: idleCollapseSeconds) { _ in resetIdleClock() }
+        .onChange(of: idleDockSeconds) { _ in resetIdleClock() }
+        .onChange(of: manager.isDragging) { _ in resetIdleClock() }
         .onReceive(manager.undockRequested) { id in
             guard id == shelfID, isDocked else { return }
             withAnimation(transitionAnimation) { isDocked = false }
@@ -136,6 +154,7 @@ struct ShelfContainerView: View {
         // show), so fall back to collapsed and let that view handle the
         // empty case.
         .onChange(of: items.count) { newCount in
+            resetIdleClock()
             if newCount == 0, isExpanded {
                 toggle(to: false)
             }
@@ -241,6 +260,37 @@ struct ShelfContainerView: View {
         }
 
         return false
+    }
+
+    private func resetIdleClock() {
+        idleSince = ProcessInfo.processInfo.systemUptime
+    }
+
+    private func checkIdleShelf() {
+        let now = ProcessInfo.processInfo.systemUptime
+        let gap = now - lastIdleTick
+        lastIdleTick = now
+        // Default run-loop mode pauses during native menu tracking.
+        // Also avoid counting sleep or other long main-thread interruptions.
+        let pointerOnShelf = NSApp.windows.contains { window in
+            window is ShelfPanelMarker && window.isVisible &&
+                window.frame.contains(NSEvent.mouseLocation)
+        }
+        guard gap < 1, !isDocked, !items.isEmpty,
+              manager.shelf(id: shelfID)?.pinned != true,
+              !pointerOnShelf, !dropTargeted,
+              !manager.isDragging, !DragInitiatorView.hasActiveDrag,
+              NSEvent.pressedMouseButtons == 0,
+              conversionService.progress.isEmpty, ocrService.progress.isEmpty,
+              !NSApp.windows.contains(where: { $0.isVisible && ($0 is NSOpenPanel || $0 is NSSavePanel || $0.attachedSheet != nil) }) else {
+            resetIdleClock()
+            return
+        }
+        let delay = isExpanded ? idleCollapseSeconds : idleDockSeconds
+        guard delay > 0, now - idleSince >= Double(delay) else { return }
+        resetIdleClock()
+        if isExpanded { toggle(to: false) }
+        else { toggleDock(to: true) }
     }
 
     private func toggle(to expanded: Bool) {
@@ -469,7 +519,18 @@ private struct ExpandedShelfView: View {
                     .lineLimit(1)
                     .truncationMode(.head)
             }
-            Spacer(minLength: 0)
+            .overlay { ShelfWindowDragHandle(
+                    onDoubleTap: onCollapse,
+                    onEdge: onDock
+                ) }
+            Color.clear
+                .frame(minWidth: 20)
+                .frame(height: 36)
+                .frame(maxWidth: .infinity)
+                .overlay { ShelfWindowDragHandle(
+                    onDoubleTap: onCollapse,
+                    onEdge: onDock
+                ) }
             // Quick-dock to the right edge — same animation as the grab
             // handle in the collapsed view, surfaced here so the user
             // doesn't need to collapse first to park the panel. Sized

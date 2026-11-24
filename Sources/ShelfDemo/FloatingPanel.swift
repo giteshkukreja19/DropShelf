@@ -1,7 +1,9 @@
 import AppKit
 import SwiftUI
 
-final class FloatingPanel<Content: View>: NSPanel {
+protocol ShelfPanelMarker: AnyObject {}
+
+final class FloatingPanel<Content: View>: NSPanel, ShelfPanelMarker {
     init(contentRect: NSRect, @ViewBuilder content: () -> Content) {
         super.init(
             contentRect: contentRect,

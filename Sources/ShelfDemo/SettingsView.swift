@@ -22,10 +22,13 @@ enum ShelfExpiry: Int, CaseIterable, Identifiable {
 }
 
 enum ShelfActivation: String, CaseIterable, Identifiable {
-    case instant, oneSecond, twoSeconds, dragOnly, shakeOnly
+    case instant, oneSecond, twoSeconds, dragOnly, shakeOnly, doubleClick, singleClick, halfSecond
     var id: String { rawValue }
     var label: String {
         switch self {
+        case .doubleClick: return "Double-click"
+        case .singleClick: return "Single-click"
+        case .halfSecond: return "Hover for 0.5 seconds"
         case .instant: return "Instant hover"
         case .oneSecond: return "Hover for 1 second"
         case .twoSeconds: return "Hover for 2 seconds"
@@ -35,6 +38,7 @@ enum ShelfActivation: String, CaseIterable, Identifiable {
     }
     var delay: Double? {
         switch self {
+        case .halfSecond: return 0.5
         case .instant: return 0
         case .oneSecond: return 1
         case .twoSeconds: return 2
@@ -65,6 +69,11 @@ enum ShelfSummon: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
+    @AppStorage("shelf.idleCollapseSeconds") private var idleCollapseSeconds = 0
+    @AppStorage("shelf.idleDockSeconds") private var idleDockSeconds = 0
+    @AppStorage("shelf.edgeDock") private var edgeDock = true
+    @AppStorage("shelf.shakeEnabled") private var shakeEnabled = true
+    @AppStorage("shelf.handleGlow") private var handleGlow = true
     @AppStorage("shelf.summon") private var summon: ShelfSummon = .instant
     @AppStorage("shelf.activation") private var activation: ShelfActivation = .oneSecond
     @AppStorage("shelf.expiryDays") private var expiryDays: Int = ShelfExpiry.tenDays.rawValue
@@ -125,11 +134,35 @@ struct SettingsView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                Text("Hover over the filename or file-count button to expand. Click that button or double-click the file stack to expand. Drag files directly from the stack.")
+                Text("Choose how the filename or file-count button expands the shelf. Double-click the file stack to expand, or drag files directly from it.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Automatically collapse expanded shelf")
+                    .font(.system(size: 13, weight: .medium))
+                Picker("", selection: $idleCollapseSeconds) {
+                    ForEach([0, 3, 5, 10, 15, 30, 60], id: \.self) { seconds in
+                        Text(seconds == 0 ? "Never" : "\(seconds) seconds").tag(seconds)
+                    }
+                }.labelsHidden().pickerStyle(.menu)
+                Text("Collapse when the shelf is inactive and the pointer is outside.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("Automatically dock compact shelf")
+                    .font(.system(size: 13, weight: .medium))
+                Picker("", selection: $idleDockSeconds) {
+                    ForEach([0, 3, 5, 10, 15, 30, 60], id: \.self) { seconds in
+                        Text(seconds == 0 ? "Never" : "\(seconds) seconds").tag(seconds)
+                    }
+                }.labelsHidden().pickerStyle(.menu)
+                Text("Dock after a separate period of inactivity. Pinned shelves are excluded.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            Toggle("Automatically dock at the right screen edge", isOn: $edgeDock)
+            Toggle("Shake to show shelf during file drag", isOn: $shakeEnabled)
+            Toggle("Glow on shelf handle hover", isOn: $handleGlow)
 
             VStack(alignment: .leading, spacing: 6) {
                 Toggle(L("Park new shelves at the top-right corner"), isOn: $autoParkTopRight)

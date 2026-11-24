@@ -71,6 +71,9 @@ enum ShelfSummon: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @AppStorage("shelf.idleCollapseSeconds") private var idleCollapseSeconds = 0
     @AppStorage("shelf.idleDockSeconds") private var idleDockSeconds = 0
+    @AppStorage("shelf.celebration") private var celebration = true
+    @AppStorage("pdf.wordMode") private var pdfWordMode = "automatic"
+    @AppStorage("shelf.closeAfterDrag") private var closeAfterDrag = false
     @AppStorage("shelf.edgeDock") private var edgeDock = true
     @AppStorage("shelf.shakeEnabled") private var shakeEnabled = true
     @AppStorage("shelf.handleGlow") private var handleGlow = true
@@ -160,8 +163,19 @@ struct SettingsView: View {
                 Text("Dock after a separate period of inactivity. Pinned shelves are excluded.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
+            Toggle("Close shelf after dragging out", isOn: $closeAfterDrag)
+            Picker("PDF to Word mode", selection: $pdfWordMode) {
+                Text("Automatic").tag("automatic")
+                Text("Editable Word").tag("editable")
+                Text("Preserve appearance").tag("appearance")
+            }
+            Text("Automatic preserves scanned pages as images. Editable mode uses OCR for scans; formatting may be lost.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Celebration animation after PDF drag", isOn: $celebration)
             Toggle("Automatically dock at the right screen edge", isOn: $edgeDock)
             Toggle("Shake to show shelf during file drag", isOn: $shakeEnabled)
+                .disabled(summon == .shakeOnly)
             Toggle("Glow on shelf handle hover", isOn: $handleGlow)
 
             VStack(alignment: .leading, spacing: 6) {

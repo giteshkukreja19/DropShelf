@@ -28,8 +28,8 @@ final class ShakeDetector {
     private var lastShakeTime: CFTimeInterval = 0
 
     // Tunables
-    private let window: CFTimeInterval = 0.45
-    private let minReversals = 4           // ≥2 full back-and-forth sweeps
+    private let window: CFTimeInterval = 0.8
+    private let minReversals = 3           // ≥2 full back-and-forth sweeps
     private let minTravelPerLeg: CGFloat = 12
     private let cooldown: CFTimeInterval = 0.8
 
@@ -91,7 +91,7 @@ final class ShakeDetector {
     private func validFileDrag() -> Bool {
         guard let baseline, let downPoint,
               NSEvent.pressedMouseButtons & 1 != 0,
-              shouldSuppress?() != true, shouldSuppressAutomatic?() != true,
+              shouldSuppress?() != true,
               !DragInitiatorView.hasActiveDrag else { return false }
         let point = NSEvent.mouseLocation
         guard hypot(point.x - downPoint.x, point.y - downPoint.y) > 4 else { return false }
@@ -112,8 +112,8 @@ final class ShakeDetector {
         samples.append(Sample(time: now, x: NSEvent.mouseLocation.x))
         samples.removeAll { now - $0.time > window }
         let mode = ShelfSummon(rawValue: UserDefaults.standard.string(forKey: "shelf.summon") ?? "instant") ?? .instant
-        let timed = mode.delay.map { now - (dragStarted ?? now) >= $0 } ?? false
-        let shaken = UserDefaults.standard.object(forKey: "shelf.shakeEnabled") as? Bool ?? true
+        let timed = shouldSuppressAutomatic?() != true && (mode.delay.map { now - (dragStarted ?? now) >= $0 } ?? false)
+        let shaken = mode == .shakeOnly || (UserDefaults.standard.object(forKey: "shelf.shakeEnabled") as? Bool ?? true)
         guard timed || (shaken && detectShake() && now - lastShakeTime > cooldown) else { return }
         dragSummoned = true
         lastShakeTime = now

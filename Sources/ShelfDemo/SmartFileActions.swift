@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 enum SmartFileActions {
     enum Action: String {
         case splitPDF = "Split PDF into Pages…", extractPages = "Extract / Reorder PDF Pages…", deletePages = "Delete PDF Pages…", compressPDF = "Compress PDF…", protectPDF = "Password Protect PDF…", wordPDF = "Convert Word to PDF…"
+        case pdfWord = "Convert PDF to Word (.docx)…"
         case mergePDF = "Merge PDFs…", combinedPDF = "Create Combined PDF…", imagePDF = "Create PDF…", mergeWord = "Merge Word Documents…", rotatePDF = "Rotate PDF Pages 90°…", extractPDF = "Extract PDF Text…", wordText = "Extract Word Text…", stitch = "Stitch Images…", resize = "Resize Images…", compress = "Compress Images…", metadata = "Remove Image Metadata"
     }
     static func files(_ items: [ShelfItem]) -> [URL] {
@@ -16,7 +17,7 @@ enum SmartFileActions {
     static func word(_ u: URL) -> Bool { u.pathExtension.lowercased() == "docx" }
     static func options(_ urls: [URL]) -> [Action] {
         guard !urls.isEmpty else { return [] }
-        if urls.allSatisfy(pdf) { return (urls.count > 1 ? [.mergePDF] : []) + [.rotatePDF, .extractPDF] + (urls.count == 1 ? [.splitPDF, .extractPages, .deletePages, .compressPDF, .protectPDF] : []) }
+        if urls.allSatisfy(pdf) { return (urls.count > 1 ? [.mergePDF] : []) + [.rotatePDF, .extractPDF] + (urls.count == 1 ? [.splitPDF, .extractPages, .deletePages, .compressPDF, .protectPDF, .pdfWord] : []) }
         if urls.allSatisfy(word) { return (urls.count > 1 ? [.mergeWord] : []) + [.wordText, .wordPDF] }
         if urls.allSatisfy(image) { return [.imagePDF, .resize, .compress, .metadata] + (urls.count > 1 ? [.stitch] : []) }
         if urls.count > 1 && urls.allSatisfy({ pdf($0) || image($0) }) { return [.combinedPDF] }
@@ -130,10 +131,16 @@ enum SmartFileActions {
             guard order.count == urls.count, Set(order) == Set(1...urls.count) else { failure("Enter each position exactly once."); return }
             urls = zip(order, urls).sorted { $0.0 < $1.0 }.map { $0.1 }
         }
-        let ext = action == .mergeWord ? "docx" : ([.extractPDF, .wordText].contains(action) ? "txt" : (action == .stitch ? "png" : "pdf"))
+        let ext = (action == .mergeWord || action == .pdfWord) ? "docx" : ([.extractPDF, .wordText].contains(action) ? "txt" : (action == .stitch ? "png" : "pdf"))
         let panel = NSSavePanel(); panel.nameFieldStringValue = "DropShelf Output.\(ext)"; panel.allowedContentTypes = [UTType(filenameExtension: ext) ?? .data]
         guard panel.runModal() == .OK, let dest = panel.url else { return }
         guard !urls.contains(where: { $0.resolvingSymlinksInPath().standardizedFileURL == dest.resolvingSymlinksInPath().standardizedFileURL }) else { failure("Choose a different output file to preserve originals."); return }
+        if action == .pdfWord, let input = urls.first {
+            background(title: "Converting PDF to Word", destination: dest, manager: manager, shelfID: shelfID, validatePDF: false) { cancelled in
+                try PDFWordConverter.convert(input, cancelled: cancelled)
+            }
+            return
+        }
         if action == .wordPDF {
             let inputs = urls
             background(title: "Converting Word to PDF", destination: dest, manager: manager, shelfID: shelfID) { cancelled in
@@ -153,7 +160,7 @@ enum SmartFileActions {
         func cancel() { lock.lock(); value = true; lock.unlock() }
         func isCancelled() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
     }
-    private static func background(title: String, destination: URL, manager: ShelfManager, shelfID: UUID, work: @escaping @Sendable (() -> Bool) throws -> Data) {
+    private static func background(title: String, destination: URL, manager: ShelfManager, shelfID: UUID, validatePDF: Bool = true, work: @escaping @Sendable (() -> Bool) throws -> Data) {
         let flag = CancellationFlag()
         let alert = NSAlert(); alert.messageText = title; alert.informativeText = "Processing locally. Please wait."
         alert.addButton(withTitle: "Cancel")
@@ -173,7 +180,9 @@ enum SmartFileActions {
         do {
             guard let result else { throw PDFToolkit.error("No output produced.") }
             let data = try result.get()
-            guard let pdf = PDFDocument(data: data), pdf.pageCount > 0 else { throw PDFToolkit.error("Invalid PDF output.") }
+            if validatePDF {
+                guard let pdf = PDFDocument(data: data), pdf.pageCount > 0 else { throw PDFToolkit.error("Invalid PDF output.") }
+            }
             try data.write(to: destination, options: .atomic)
             _ = manager.addFile(url: destination, to: shelfID)
         } catch { failure(error.localizedDescription) }

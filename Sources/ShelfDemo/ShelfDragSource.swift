@@ -53,6 +53,8 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
 
     private var mouseDownPoint: NSPoint?
     private var sessionActive = false
+    private var draggingPDF = false
+    private weak var dragSourceWindow: NSWindow?
     static private(set) var hasActiveDrag = false
     private let dragThreshold: CGFloat = 4
 
@@ -113,6 +115,7 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
             FileManager.default.fileExists(atPath: $0.path)
         }
         guard !urls.isEmpty else { return }
+        draggingPDF = urls.contains { $0.pathExtension.lowercased() == "pdf" }
 
         // Snapshot the actual rendered tile *before* notifying the source
         // (which fades the tile out). Use the caller-provided visible card
@@ -160,6 +163,7 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
             draggingItems.append(item)
         }
 
+        dragSourceWindow = window
         sessionActive = true
         Self.hasActiveDrag = true
         onStart?()
@@ -221,7 +225,19 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
     ) {
         sessionActive = false
         Self.hasActiveDrag = false
+        let source = dragSourceWindow
+        dragSourceWindow = nil
         onEnd?()
+        guard !operation.isEmpty,
+              let source,
+              !NSApp.windows.contains(where: { $0 is ShelfPanelMarker && $0.isVisible && $0.frame.contains(screenPoint) })
+        else { return }
+        // Hide only the originating shelf; keep its model and files intact.
+        let close = UserDefaults.standard.bool(forKey: "shelf.closeAfterDrag")
+        if draggingPDF && (UserDefaults.standard.object(forKey: "shelf.celebration") as? Bool ?? true)
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            ShelfCelebration.show(around: source, close: close)
+        } else if close { source.orderOut(nil) }
     }
 
     // MARK: - NSFilePromiseProviderDelegate

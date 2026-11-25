@@ -152,7 +152,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.image = image
     }
 
-    private let collapsedSize = NSSize(width: 210, height: 210)
+    private var collapsedSize: NSSize {
+        let stored = UserDefaults.standard.object(forKey: "shelf.compactSizePercent") as? Int ?? 100
+        let scale = CGFloat(min(150, max(90, stored))) / 100
+        return NSSize(width: 210 * scale, height: 210 * scale)
+    }
     private let expandedSize = NSSize(width: 520, height: 560)
     private let expandedMinHeight: CGFloat = 280
     private let dockedSize = NSSize(width: 44, height: 150)
@@ -484,9 +488,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Set once at creation; the title doesn't refresh on language
             // change. Pre-existing accepted limitation from v1.4.
             window.title = L("Shelf Settings")
-            window.styleMask = [.titled, .closable]
+            window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
+            window.contentMinSize = NSSize(width: 540, height: 410)
+            window.setContentSize(NSSize(width: 620, height: 470))
             window.isReleasedWhenClosed = false
             window.center()
+            window.setFrameAutosaveName("DropShelfSettingsWindow")
             settingsWindow = window
         }
         // Accessory app: temporarily bring to front so the window receives focus.
@@ -809,6 +816,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    private func hideIdleDockedPanel(for shelfID: UUID) {
+        guard let panel = panels[shelfID], panel.isVisible,
+              dockedShelfIDs.contains(shelfID),
+              manager.shelf(id: shelfID)?.pinned != true,
+              !manager.items(of: shelfID).isEmpty else { return }
+        // Keep the shelf model; discard only the window so reopening starts clean.
+        panel.orderOut(nil)
+        panels.removeValue(forKey: shelfID)
+        dockedShelfIDs.remove(shelfID)
+        dockedFrames.removeValue(forKey: shelfID)
+        preDockFrames.removeValue(forKey: shelfID)
+        expandedShelfIDs.remove(shelfID)
+        if dockedShelfIDs.isEmpty { removeWindowMoveObserver() }
+    }
+
     private func hidePanel(for shelfID: UUID) {
         panels[shelfID]?.orderOut(nil)
         // Empty shelves are invisible in Recent Shelves, so dismissing them
@@ -833,6 +855,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 shelfID: shelfID,
                 isEphemeral: isEphemeral,
                 onClose: { self?.hidePanel(for: shelfID) },
+                onIdleHideDocked: { self?.hideIdleDockedPanel(for: shelfID) },
                 onResize: { expanded in self?.setPanelExpanded(shelfID, expanded: expanded) },
                 onDockChanged: { docked in self?.setPanelDocked(shelfID, docked: docked) }
             )

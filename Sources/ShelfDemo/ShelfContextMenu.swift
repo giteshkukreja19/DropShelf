@@ -71,7 +71,12 @@ final class ShelfItemActions: NSObject {
     }
 
     @objc func share() {
-        ShareCoordinator.shared.share(item: item)
+        ShareCoordinator.shared.share(items: selectedItems.isEmpty ? [item] : selectedItems)
+    }
+
+    @objc func copyToCloud(_ sender: NSMenuItem) {
+        guard let provider = sender.representedObject as? String else { return }
+        CloudSharing.shared.copy(items: selectedItems.isEmpty ? [item] : selectedItems, provider: provider)
     }
 
     @objc func moveToTrash() {
@@ -362,6 +367,7 @@ enum ShelfContextMenu {
         )
         share.target = actions
         menu.addItem(share)
+        menu.addItem(CloudSharing.menu(target: actions, action: #selector(ShelfItemActions.copyToCloud), enabled: hasFile || actions.selectedItems.contains { $0.fileURL != nil }))
 
         menu.addItem(.separator())
 

@@ -47,12 +47,14 @@ struct ShelfContainerView: View {
     /// shelves have no auto-close path, so they always need the X.
     var isEphemeral: Bool = false
     var onClose: () -> Void = {}
+    var onIdleHideDocked: () -> Void = {}
     var onResize: (_ expanded: Bool) -> Void = { _ in }
     var onDockChanged: (_ docked: Bool) -> Void = { _ in }
 
     @AppStorage("shelf.activation") private var activation: ShelfActivation = .oneSecond
     @AppStorage("shelf.idleCollapseSeconds") private var idleCollapseSeconds = 0
     @AppStorage("shelf.idleDockSeconds") private var idleDockSeconds = 0
+    @AppStorage("shelf.idleHideDockedSeconds") private var idleHideDockedSeconds = 0
     @State private var idleSince = ProcessInfo.processInfo.systemUptime
     @State private var lastIdleTick = ProcessInfo.processInfo.systemUptime
     @State private var shelfHovered = false
@@ -60,6 +62,7 @@ struct ShelfContainerView: View {
     @Namespace private var ns
     @State private var isExpanded = false
     @State private var isDocked = false
+    @AppStorage("shelf.instantActions") private var instantActions = true
     @State private var dropTargeted = false
     @State private var selection: Set<UUID> = []
     // Sticky once true: lets the collapsed view show its X close button
@@ -128,6 +131,7 @@ struct ShelfContainerView: View {
                 onDrop: handleDrop
             )
         )
+        .background(InstantActionsAnchor(enabled: instantActions && !isDocked && !isExpanded && !manager.isDragging))
         .onHover { inside in
             shelfHovered = inside
             resetIdleClock()
@@ -137,6 +141,7 @@ struct ShelfContainerView: View {
         .onChange(of: isDocked) { _ in resetIdleClock() }
         .onChange(of: idleCollapseSeconds) { _ in resetIdleClock() }
         .onChange(of: idleDockSeconds) { _ in resetIdleClock() }
+        .onChange(of: idleHideDockedSeconds) { _ in resetIdleClock() }
         .onChange(of: manager.isDragging) { _ in resetIdleClock() }
         .onReceive(manager.undockRequested) { id in
             guard id == shelfID, isDocked else { return }
@@ -276,7 +281,7 @@ struct ShelfContainerView: View {
             window is ShelfPanelMarker && window.isVisible &&
                 window.frame.contains(NSEvent.mouseLocation)
         }
-        guard gap < 1, !isDocked, !items.isEmpty,
+        guard gap < 1, !items.isEmpty,
               manager.shelf(id: shelfID)?.pinned != true,
               !pointerOnShelf, !dropTargeted,
               !manager.isDragging, !DragInitiatorView.hasActiveDrag,
@@ -286,10 +291,11 @@ struct ShelfContainerView: View {
             resetIdleClock()
             return
         }
-        let delay = isExpanded ? idleCollapseSeconds : idleDockSeconds
+        let delay = isDocked ? idleHideDockedSeconds : (isExpanded ? idleCollapseSeconds : idleDockSeconds)
         guard delay > 0, now - idleSince >= Double(delay) else { return }
         resetIdleClock()
-        if isExpanded { toggle(to: false) }
+        if isDocked { onIdleHideDocked() }
+        else if isExpanded { toggle(to: false) }
         else { toggleDock(to: true) }
     }
 

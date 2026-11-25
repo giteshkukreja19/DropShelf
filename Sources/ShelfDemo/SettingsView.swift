@@ -71,6 +71,7 @@ enum ShelfSummon: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @AppStorage("shelf.idleCollapseSeconds") private var idleCollapseSeconds = 0
     @AppStorage("shelf.idleDockSeconds") private var idleDockSeconds = 0
+    @AppStorage("shelf.idleHideDockedSeconds") private var idleHideDockedSeconds = 0
     @AppStorage("shelf.celebration") private var celebration = true
     @AppStorage("pdf.wordMode") private var pdfWordMode = "automatic"
     @AppStorage("shelf.closeAfterDrag") private var closeAfterDrag = false
@@ -91,12 +92,57 @@ struct SettingsView: View {
 
     @State private var pickedLanguage: AppLanguage = LanguagePreference.current
 
+    @State private var section = "Shelf Activation"
+    @State private var hoveredSection: String?
+    @AppStorage("shelf.instantActions") private var instantActions = true
+    @AppStorage("shelf.compactSizePercent") private var compactSizePercent = 100
+    private let sections = ["Shelf Activation", "Shelf Interaction", "General", "Cloud Sharing", "Instant Actions", "PDF & File Tools", "About & Updates"]
+    private let symbols = ["cursorarrow", "rectangle.on.rectangle", "gearshape", "cloud", "bolt", "doc.text", "info.circle"]
     var body: some View {
-        ScrollView {
-        VStack(alignment: .leading, spacing: 18) {
-            Text(L("Settings"))
-                .font(.system(size: 17, weight: .semibold))
-
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(sections.indices, id: \.self) { i in
+                    Button { section = sections[i] } label: {
+                        Label(sections[i], systemImage: symbols[i])
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(7)
+                            .background(section == sections[i] ? Color.accentColor.opacity(0.20) : (hoveredSection == sections[i] ? Color.primary.opacity(0.07) : Color.clear))
+                            .cornerRadius(6)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hovering in
+                        if hovering { hoveredSection = sections[i] }
+                        else if hoveredSection == sections[i] { hoveredSection = nil }
+                    }
+                }
+                Spacer()
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 48, height: 48).frame(maxWidth: .infinity)
+                Text("DropShelf " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development"))
+                    .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity)
+            }.padding(12).frame(width: 195).background(.regularMaterial)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(section).font(.title2.bold())
+                    switch section {
+                    case "Shelf Activation": activationSettings
+                    case "Shelf Interaction": interactionSettings
+                    case "General": generalSettings
+                    case "Cloud Sharing": Text("Use Copy to Cloud in the shelf menu to choose an iCloud Drive, Google Drive or OneDrive synced folder. WhatsApp is available when its native sharing service supports the selected items.")
+                    case "Instant Actions":
+                        Toggle("Enable Instant Actions", isOn: $instantActions)
+                        Text("The lightning button appears outside the shelf when the cursor approaches. Move toward it to reveal sharing actions.").foregroundStyle(.secondary)
+                        Text("Drop files onto AirDrop, Messages, Mail or WhatsApp. Unsupported sharing destinations leave the file with its original source.").foregroundStyle(.secondary)
+                    case "PDF & File Tools": pdfSettings
+                    default: updateSettings
+                    }
+                }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }.frame(minWidth: 540, idealWidth: 620, minHeight: 410, idealHeight: 470)
+        .onAppear { launchAtLogin = LaunchAtLoginManager.isEnabled; pickedLanguage = LanguagePreference.current }
+    }
+    @ViewBuilder private var activationSettings: some View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Show new shelf").font(.system(size: 13, weight: .medium))
                 Picker("", selection: $summon) {
@@ -105,29 +151,18 @@ struct SettingsView: View {
                 Text("Drag a file from Finder or the desktop to summon a new shelf. Shake is always available.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            VStack(alignment: .leading, spacing: 6) {
-                Text(L("Auto-delete shelves"))
-                    .font(.system(size: 13, weight: .medium))
-                Picker("", selection: $expiryDays) {
-                    ForEach(ShelfExpiry.allCases) { opt in
-                        Text(opt.label).tag(opt.rawValue)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                // The .menu Picker bridges to NSPopUpButton and caches its
-                // option Text views, so the dropdown doesn't relabel when
-                // the language flips. A fresh identity on language change
-                // forces it to rebuild from scratch.
-                .id(pickedLanguage)
+            Toggle("Shake to show shelf during file drag", isOn: $shakeEnabled)
+                .disabled(summon == .shakeOnly)
 
-                Text(L("settings.expiry.description"))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+    }
+    @ViewBuilder private var interactionSettings: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Compact shelf size: \(compactSizePercent)%").font(.system(size: 13, weight: .medium))
+                Slider(value: Binding(get: { Double(compactSizePercent) }, set: { compactSizePercent = Int($0) }), in: 90...150, step: 5)
+                Button("Restore default size") { compactSizePercent = 100 }
+                Text("Applies to newly opened compact shelves. Expanded and docked shelves keep their original layout.").font(.caption).foregroundStyle(.secondary)
             }
 
-            Divider()
             VStack(alignment: .leading, spacing: 6) {
                 Text("Expand existing shelf").font(.system(size: 13, weight: .medium))
                 Picker("", selection: $activation) {
@@ -162,20 +197,20 @@ struct SettingsView: View {
                 }.labelsHidden().pickerStyle(.menu)
                 Text("Dock after a separate period of inactivity. Pinned shelves are excluded.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("Automatically hide docked shelf")
+                    .font(.system(size: 13, weight: .medium))
+                Picker("", selection: $idleHideDockedSeconds) {
+                    ForEach([0, 5, 10, 15, 30, 60, 300], id: \.self) { seconds in
+                        Text(seconds == 0 ? "Never" : "\(seconds) seconds").tag(seconds)
+                    }
+                }.labelsHidden().pickerStyle(.menu)
+                Text("Hide the edge tab after inactivity. Files remain available in Recent Shelves. Pinned shelves are excluded.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+
             }
             Toggle("Close shelf after dragging out", isOn: $closeAfterDrag)
-            Picker("PDF to Word mode", selection: $pdfWordMode) {
-                Text("Automatic").tag("automatic")
-                Text("Editable Word").tag("editable")
-                Text("Preserve appearance").tag("appearance")
-            }
-            Text("Automatic preserves scanned pages as images. Editable mode uses OCR for scans; formatting may be lost.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             Toggle("Celebration animation after PDF drag", isOn: $celebration)
             Toggle("Automatically dock at the right screen edge", isOn: $edgeDock)
-            Toggle("Shake to show shelf during file drag", isOn: $shakeEnabled)
-                .disabled(summon == .shakeOnly)
             Toggle("Glow on shelf handle hover", isOn: $handleGlow)
 
             VStack(alignment: .leading, spacing: 6) {
@@ -191,6 +226,31 @@ struct SettingsView: View {
                 Toggle(L("Collapse expanded shelf when clicking outside"), isOn: $closeOnOutsideClick)
                     .toggleStyle(.switch)
                 Text(L("settings.collapse.description"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+
+    }
+    @ViewBuilder private var generalSettings: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L("Auto-delete shelves"))
+                    .font(.system(size: 13, weight: .medium))
+                Picker("", selection: $expiryDays) {
+                    ForEach(ShelfExpiry.allCases) { opt in
+                        Text(opt.label).tag(opt.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                // The .menu Picker bridges to NSPopUpButton and caches its
+                // option Text views, so the dropdown doesn't relabel when
+                // the language flips. A fresh identity on language change
+                // forces it to rebuild from scratch.
+                .id(pickedLanguage)
+
+                Text(L("settings.expiry.description"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -243,6 +303,20 @@ struct SettingsView: View {
 
             Divider()
 
+
+    }
+    @ViewBuilder private var pdfSettings: some View {
+            Picker("PDF to Word mode", selection: $pdfWordMode) {
+                Text("Automatic").tag("automatic")
+                Text("Editable Word").tag("editable")
+                Text("Preserve appearance").tag("appearance")
+            }
+            Text("Automatic preserves scanned pages as images. Editable mode uses OCR for scans; formatting may be lost.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+    }
+    @ViewBuilder private var updateSettings: some View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(L("Updates"))
                     .font(.system(size: 13, weight: .medium))
@@ -253,16 +327,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-        }
-        .padding(20)
-        }
-        .frame(width: 400, height: 650, alignment: .leading)
-        .onAppear {
-            launchAtLogin = LaunchAtLoginManager.isEnabled
-            pickedLanguage = LanguagePreference.current
-        }
     }
-
     private func applyLaunchAtLogin(_ enable: Bool) {
         do {
             try LaunchAtLoginManager.setEnabled(enable)

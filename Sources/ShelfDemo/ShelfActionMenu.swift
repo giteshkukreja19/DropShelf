@@ -73,6 +73,17 @@ private final class ShelfActionTargets: NSObject {
         service.perform(withItems: urls)
     }
 
+    @objc func whatsApp() { ShareCoordinator.shared.whatsApp(items: items) }
+
+    @objc func shareAll() {
+        ShareCoordinator.shared.share(items: items)
+    }
+
+    @objc func copyToCloud(_ sender: NSMenuItem) {
+        guard let provider = sender.representedObject as? String else { return }
+        CloudSharing.shared.copy(items: items, provider: provider)
+    }
+
     @objc func addFromClipboard() {
         _ = manager.addFromClipboard(to: shelfID)
     }
@@ -476,6 +487,16 @@ enum ShelfActionMenuBuilder {
         ))
 
         menu.addItem(.separator())
+
+        menu.addItem(makeItem(
+            title: "Share All…",
+            symbol: "square.and.arrow.up",
+            action: #selector(ShelfActionTargets.shareAll),
+            target: targets,
+            enabled: !items.isEmpty
+        ))
+        menu.addItem(makeItem(title: "WhatsApp…", symbol: "message", action: #selector(ShelfActionTargets.whatsApp), target: targets, enabled: !items.isEmpty))
+        menu.addItem(CloudSharing.menu(target: targets, action: #selector(ShelfActionTargets.copyToCloud), enabled: hasFiles))
 
         menu.addItem(makeItem(
             title: L("AirDrop"),

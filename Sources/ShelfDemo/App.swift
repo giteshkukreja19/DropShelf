@@ -102,6 +102,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // inside the handler so toggling the setting takes effect immediately
     // without needing to install/uninstall the monitor.
     private var outsideClickMonitor: Any?
+    private var shortcutGlobalMonitor: Any?
+    private var shortcutLocalMonitor: Any?
+    private var screenCaptureActive = false
 
     private func applyStatusIcon(dropping: Bool? = nil, awake: Bool? = nil) {
         if let dropping { dropTargetActive = dropping }
@@ -221,6 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         installPasteShortcut()
+        installShelfShortcuts()
 
         shelvesCancellable = manager.$shelves
             .sink { [weak self] shelves in
@@ -359,6 +363,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         newFromClip.target = self
         newFromClip.keyEquivalentModifierMask = [.option, .shift]
         menu.addItem(newFromClip)
+
+        let newWebLink = NSMenuItem(title: "New Shelf From Copied Web Link", action: #selector(newShelfFromWebLinkAction), keyEquivalent: "")
+        newWebLink.target = self
+        menu.addItem(newWebLink)
 
         let captureScreen = NSMenuItem(
             title: L("Capture Screen Text…"),
@@ -635,8 +643,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         openPanel(for: shelfID, nearCursor: false)
     }
 
+    @objc private func newShelfFromWebLinkAction() {
+        let links = WebDragLinks.read(NSPasteboard.general)
+        guard !links.isEmpty else {
+            let alert = NSAlert()
+            alert.messageText = "No web link copied"
+            alert.informativeText = "Copy the website address from your browser, then try again."
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            return
+        }
+        let shelfID = manager.createShelf()
+        for link in links { manager.addText(link.absoluteString, to: shelfID) }
+        openPanel(for: shelfID, nearCursor: false)
+    }
+
     @objc private func captureScreenTextAction() {
+        guard !screenCaptureActive else { return }
+        screenCaptureActive = true
         Task { @MainActor in
+            defer { screenCaptureActive = false }
             do {
                 guard let text = try await ScreenOCR.captureAndExtractText() else { return }
                 let shelfID = activeOrNewShelfID()
@@ -1285,8 +1312,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Quit
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let monitor = shortcutGlobalMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = shortcutLocalMonitor { NSEvent.removeMonitor(monitor) }
         conversionService.cancelAll()
         ocrService.cancelAll()
+    }
+
+    private func installShelfShortcuts() {
+        shortcutGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            Task { @MainActor in _ = self?.handleShelfShortcut(event) }
+        }
+        shortcutLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleShelfShortcut(event) == true ? nil : event
+        }
+    }
+
+    private func handleShelfShortcut(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.option, .shift] else { return false }
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "a": if !event.isARepeat { newShelfFromClipboardAction() }; return true
+        case "c": if !event.isARepeat { captureScreenTextAction() }; return true
+        default: return false
+        }
     }
 
     // MARK: - Paste shortcut

@@ -52,6 +52,7 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
     var visibleCardSize: (() -> CGSize)?
 
     private var mouseDownPoint: NSPoint?
+    private var clickModifiers: NSEvent.ModifierFlags = []
     private var sessionActive = false
     private var draggingPDF = false
     private weak var dragSourceWindow: NSWindow?
@@ -74,6 +75,8 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
     // our tile's mouse gesture.
     override var mouseDownCanMoveWindow: Bool { false }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         // Claim hits when we can drag or when we offer a context menu.
         let hasDrag = !(provider?() ?? []).isEmpty
@@ -83,6 +86,7 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
 
     override func mouseDown(with event: NSEvent) {
         mouseDownPoint = event.locationInWindow
+        clickModifiers = event.modifierFlags
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -100,10 +104,10 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
             let loc = event.locationInWindow
             let distance = hypot(loc.x - start.x, loc.y - start.y)
             if distance < dragThreshold {
-                if event.clickCount >= 2 {
+                if event.clickCount >= 2 && clickModifiers.intersection([.command, .shift]).isEmpty {
                     onDoubleClick?()
                 } else {
-                    onClick?(event.modifierFlags)
+                    onClick?(clickModifiers)
                 }
             }
         }

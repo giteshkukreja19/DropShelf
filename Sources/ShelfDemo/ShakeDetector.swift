@@ -96,8 +96,11 @@ final class ShakeDetector {
         let point = NSEvent.mouseLocation
         guard hypot(point.x - downPoint.x, point.y - downPoint.y) > 4 else { return false }
         let board = NSPasteboard(name: .drag)
-        return board.changeCount != baseline && board.canReadObject(
-            forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+        guard board.changeCount != baseline else { return false }
+        return board.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) ||
+            !WebDragLinks.read(board).isEmpty ||
+            board.availableType(from: [.png, .tiff]) != nil ||
+            board.availableType(from: NSFilePromiseReceiver.readableDraggedTypes.map(NSPasteboard.PasteboardType.init(rawValue:))) != nil
     }
 
     private func checkFileDrag() {

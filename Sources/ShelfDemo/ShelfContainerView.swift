@@ -131,7 +131,12 @@ struct ShelfContainerView: View {
                 onDrop: handleDrop
             )
         )
-        .background(InstantActionsAnchor(enabled: instantActions && !isDocked && !isExpanded && !manager.isDragging))
+        .background(InstantActionsAnchor(enabled: instantActions && !isDocked && !isExpanded, values: {
+            items.compactMap { item -> Any? in
+                if let url = item.fileURL { return url }
+                return item.textContent
+            }
+        }))
         .onHover { inside in
             shelfHovered = inside
             resetIdleClock()
@@ -200,6 +205,16 @@ struct ShelfContainerView: View {
             return true
         }
 
+        // Explicit web links before promises, unless actual image bytes are offered.
+        if pasteboard.availableType(from: [.png, .tiff]) == nil {
+            // Explicit browser URL payloads are saved as text links, without fetching remote content.
+            let links = WebDragLinks.read(pasteboard)
+            if !links.isEmpty {
+                for link in links { manager.addText(link.absoluteString, to: target) }
+                return true
+            }
+        }
+
         // 2. File promises — sources like Mail, Photos, and some browsers
         // vend the file lazily via NSFilePromiseReceiver. The receiver writes
         // the real bytes into our temp dir, then we add it to the shelf.
@@ -254,6 +269,13 @@ struct ShelfContainerView: View {
                 }
             }
             if staged { return true }
+        }
+
+        // Explicit browser URL payloads are saved as text links, without fetching remote content.
+        let links = WebDragLinks.read(pasteboard)
+        if !links.isEmpty {
+            for link in links { manager.addText(link.absoluteString, to: target) }
+            return true
         }
 
         // 4. Plain text — pasted/dragged snippets. addText takes care of
@@ -387,6 +409,8 @@ private struct ExpandedShelfView: View {
     /// with new UUIDs, so carrying selection across levels would just hold
     /// stale identifiers.
     @State private var folderSelection: Set<UUID> = []
+    @State private var selectionAnchor: UUID?
+    @State private var folderSelectionAnchor: UUID?
 
     private var viewMode: ShelfViewMode {
         get { ShelfViewMode(rawValue: viewModeRaw) ?? .grid }
@@ -441,6 +465,12 @@ private struct ExpandedShelfView: View {
             }
             return "\(crumbs) · \(countLabel)"
         }
+        let chosen = items.filter { selection.contains($0.id) }
+        if !chosen.isEmpty {
+            let sizes = chosen.compactMap { $0.byteSize }
+            let count = "\(chosen.count) selected"
+            return sizes.count == chosen.count ? "\(count) · \(ShelfItem.format(bytes: sizes.reduce(0, +)))" : count
+        }
         let size = manager.displayTotalSize(of: shelfID)
         if shelf?.name?.isEmpty == false {
             return size == "—" ? countTitle : "\(countTitle) · \(size)"
@@ -455,15 +485,8 @@ private struct ExpandedShelfView: View {
             Spacer(minLength: 0)
             revealButton
         }
-        // Clear selection on any tap that wasn't claimed by a tile, header
-        // button, or the reveal pill. ShelfDragOverlay's NSView consumes
-        // tile clicks before they reach this gesture, so this only fires
-        // on empty/black-space clicks.
-        .contentShape(Rectangle())
-        .onTapGesture {
-            selection.removeAll()
-            folderSelection.removeAll()
-        }
+        // Native tile overlays own selection. A parent SwiftUI tap gesture
+        // can also fire for those clicks and erase the existing selection.
         .onReceive(manager.selectAllRequested) { id in
             // Cmd-A from the app-level key monitor. Routes to the right
             // selection set depending on what the user is actually looking at.
@@ -863,14 +886,15 @@ private struct ExpandedShelfView: View {
     }
 
     private func handleFolderClick(entry: FolderEntry, modifiers: NSEvent.ModifierFlags) {
-        if modifiers.contains(.command) {
-            if folderSelection.contains(entry.id) {
-                folderSelection.remove(entry.id)
-            } else {
-                folderSelection.insert(entry.id)
-            }
+        let ordered = currentEntries.map(\.id)
+        if modifiers.contains(.shift), let anchor = folderSelectionAnchor,
+           let start = ordered.firstIndex(of: anchor), let end = ordered.firstIndex(of: entry.id) {
+            let range = Set(ordered[min(start, end)...max(start, end)])
+            folderSelection.formUnion(range)
         } else {
-            folderSelection = [entry.id]
+            if folderSelection.contains(entry.id) { folderSelection.remove(entry.id) }
+            else { folderSelection.insert(entry.id) }
+            folderSelectionAnchor = entry.id
         }
     }
 
@@ -891,14 +915,15 @@ private struct ExpandedShelfView: View {
         // inline chevron button rendered next to their name — that's the
         // only navigation affordance, so a stray card click can't accidentally
         // descend into a folder while the user is just trying to select it.
-        if modifiers.contains(.command) {
-            if selection.contains(itemID) {
-                selection.remove(itemID)
-            } else {
-                selection.insert(itemID)
-            }
+        let ordered = Array(items.reversed()).map(\.id)
+        if modifiers.contains(.shift), let anchor = selectionAnchor,
+           let start = ordered.firstIndex(of: anchor), let end = ordered.firstIndex(of: itemID) {
+            let range = Set(ordered[min(start, end)...max(start, end)])
+            selection.formUnion(range)
         } else {
-            selection = [itemID]
+            if selection.contains(itemID) { selection.remove(itemID) }
+            else { selection.insert(itemID) }
+            selectionAnchor = itemID
         }
     }
 
@@ -952,7 +977,7 @@ private struct ExpandedShelfView: View {
             NSWorkspace.shared.activateFileViewerSelecting([url])
             return
         }
-        let urls = items.compactMap { $0.fileURL }
+        let urls = items.filter { selection.isEmpty || selection.contains($0.id) }.compactMap { $0.fileURL }
         guard !urls.isEmpty else { return }
         NSWorkspace.shared.activateFileViewerSelecting(urls)
     }
@@ -1444,7 +1469,7 @@ private struct DocumentGridItem: View {
                     menuBuilder: contextMenuBuilder,
                     onClick: onClick,
                     onDoubleClick: {
-                        if let url = item.fileURL {
+                        if !WebDragLinks.open(item), let url = item.fileURL {
                             NSWorkspace.shared.open(url)
                         }
                     },
@@ -1723,7 +1748,7 @@ private struct DocumentListItem: View {
                 menuBuilder: contextMenuBuilder,
                 onClick: onClick,
                 onDoubleClick: {
-                    if let url = item.fileURL {
+                    if !WebDragLinks.open(item), let url = item.fileURL {
                         NSWorkspace.shared.open(url)
                     }
                 }

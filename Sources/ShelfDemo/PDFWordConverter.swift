@@ -99,7 +99,7 @@ out.save(sys.argv[2])
             !(pdf.page(at: index)?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         let mode = UserDefaults.standard.string(forKey: "pdf.wordMode") ?? "automatic"
-        if mode == "appearance" || (mode != "editable" && !hasText) {
+        if mode == "appearance" {
             return try convertLayout(url, cancelled: cancelled, appearance: true)
         }
         if hasText { return try convertLayout(url, cancelled: cancelled) }

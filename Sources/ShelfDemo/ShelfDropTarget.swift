@@ -17,6 +17,7 @@ import UniformTypeIdentifiers
 struct ShelfDropTarget: NSViewRepresentable {
     @Binding var isTargeted: Bool
     let allowDrop: () -> Bool
+    var preferredOperation: NSDragOperation = .generic
     let onDrop: (NSPasteboard) -> Bool
 
     func makeCoordinator() -> Coordinator {
@@ -26,6 +27,7 @@ struct ShelfDropTarget: NSViewRepresentable {
     func makeNSView(context: Context) -> ShelfDropView {
         let view = ShelfDropView()
         let coordinator = context.coordinator
+        view.preferredOperation = { coordinator.parent.preferredOperation }
         view.allowDrop = { coordinator.parent.allowDrop() }
         view.onTargetedChange = { value in coordinator.setTargeted(value) }
         view.onPerformDrop = { pb in coordinator.parent.onDrop(pb) }
@@ -57,6 +59,7 @@ struct ShelfDropTarget: NSViewRepresentable {
 }
 
 final class ShelfDropView: NSView {
+    var preferredOperation: () -> NSDragOperation = { .generic }
     var allowDrop: () -> Bool = { true }
     var onTargetedChange: ((Bool) -> Void)?
     var onPerformDrop: ((NSPasteboard) -> Bool)?
@@ -72,12 +75,15 @@ final class ShelfDropView: NSView {
             .tiff,
             .png,
             .string,
+            NSPasteboard.PasteboardType("WebURLsWithTitlesPboardType"),
+            NSPasteboard.PasteboardType("text/uri-list"),
         ]
         types.append(contentsOf:
             NSFilePromiseReceiver.readableDraggedTypes
                 .map(NSPasteboard.PasteboardType.init(rawValue:))
         )
-        registerForDraggedTypes(types)
+        types.append(contentsOf: WebDragLinks.types)
+        registerForDraggedTypes(Array(Set(types)))
     }
 
     required init?(coder: NSCoder) { nil }
@@ -93,12 +99,20 @@ final class ShelfDropView: NSView {
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard allowDrop() else { return [] }
         onTargetedChange?(true)
-        return .generic
+        return negotiatedOperation(sender)
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard allowDrop() else { return [] }
-        return .generic
+        return negotiatedOperation(sender)
+    }
+
+    private func negotiatedOperation(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let preferred = preferredOperation()
+        if sender.draggingSourceOperationMask.contains(preferred) { return preferred }
+        if sender.draggingSourceOperationMask.contains(.copy) { return .copy }
+        if sender.draggingSourceOperationMask.contains(.link) { return .link }
+        return []
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {

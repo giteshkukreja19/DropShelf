@@ -4,6 +4,7 @@ import SwiftUI
 // A separate transparent panel avoids the shelf's rounded clipping mask.
 private final class InstantActionsState: ObservableObject {
     @Published var expanded = false
+    var values: () -> [Any] = { [] }
 }
 
 private struct InstantShareBar: View {
@@ -11,10 +12,10 @@ private struct InstantShareBar: View {
     var body: some View {
         HStack(spacing: 8) {
             if state.expanded {
-                InstantShareButton(name: "AirDrop", symbol: "wave.3.right")
-                InstantShareButton(name: "Messages", symbol: "message")
-                InstantShareButton(name: "Mail", symbol: "envelope")
-                InstantShareButton(name: "WhatsApp", symbol: "phone.bubble.left")
+                InstantShareButton(name: "AirDrop", symbol: "wave.3.right", values: state.values)
+                InstantShareButton(name: "Messages", symbol: "message", values: state.values)
+                InstantShareButton(name: "Mail", symbol: "envelope", values: state.values)
+                InstantShareButton(name: "WhatsApp", symbol: "phone.bubble.left", values: state.values)
             } else {
                 Image(systemName: "bolt.fill")
                     .frame(width: 34, height: 34)
@@ -29,16 +30,19 @@ private struct InstantShareBar: View {
 
 struct InstantActionsAnchor: NSViewRepresentable {
     var enabled: Bool
+    var values: () -> [Any]
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         context.coordinator.anchor = view
         context.coordinator.enabled = enabled
+        context.coordinator.setValues(values)
         context.coordinator.start()
         return view
     }
     func updateNSView(_ view: NSView, context: Context) {
         context.coordinator.enabled = enabled
+        context.coordinator.setValues(values)
     }
     static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
         coordinator.stop()
@@ -50,6 +54,7 @@ struct InstantActionsAnchor: NSViewRepresentable {
         private var timer: Timer?
         private var panel: NSPanel?
         private var lastNear = Date.distantPast
+        func setValues(_ values: @escaping () -> [Any]) { state.values = values }
         func start() {
             let t = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.tick() }
@@ -100,13 +105,19 @@ struct InstantActionsAnchor: NSViewRepresentable {
 private struct InstantShareButton: View {
     let name: String
     let symbol: String
+    let values: () -> [Any]
     @State private var targeted = false
     var body: some View {
-        Image(systemName: symbol)
+        Button {
+            _ = ShareCoordinator.shared.performInstant(name, values: values())
+        } label: {
+            Image(systemName: symbol)
             .frame(width: 34, height: 34)
             .background(.regularMaterial, in: Circle())
             .overlay(Circle().strokeBorder(targeted ? Color.accentColor : Color.clear, lineWidth: 2))
-            .overlay(ShelfDropTarget(isTargeted: $targeted, allowDrop: { true }, onDrop: perform))
+        }
+        .buttonStyle(.plain)
+            .overlay(ShelfDropTarget(isTargeted: $targeted, allowDrop: { true }, preferredOperation: .copy, onDrop: perform))
             .help(name)
             .accessibilityLabel(name)
     }
@@ -114,6 +125,8 @@ private struct InstantShareButton: View {
         var values: [Any] = []
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
             values = urls
+        } else if let links = WebDragLinks.read(pb).first {
+            values = [links]
         } else if let text = pb.string(forType: .string), !text.isEmpty {
             values = [text]
         } else { return false }

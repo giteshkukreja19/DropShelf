@@ -52,6 +52,10 @@ struct CollapsedShelfView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .matchedGeometryEffect(id: ShelfMatchedGeometry.card, in: namespace)
 
+                GrabHandle(onTap: onDock, onEdge: onDock)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .offset(y: -12)
+
                 if showCloseWhenEmpty {
                     VStack(spacing: 0) {
                         HStack(spacing: 6) {

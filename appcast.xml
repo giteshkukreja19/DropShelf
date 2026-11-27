@@ -2,20 +2,21 @@
 <rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>DropShelf</title>
-        <link>https://raw.githubusercontent.com/iamsumanp/DropShelf/main/appcast.xml</link>
+        <link>https://raw.githubusercontent.com/giteshkukreja19/DropShelf/main/appcast.xml</link>
         <description>Latest DropShelf releases.</description>
         <language>en</language>
         <item>
-            <title>DropShelf 1.5.0</title>
-            <link>https://github.com/iamsumanp/DropShelf/releases/tag/v1.5.0</link>
-            <sparkle:version>1.5.0</sparkle:version>
-            <sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
+            <title>DropShelf 2.0.0</title>
+            <link>https://github.com/giteshkukreja19/DropShelf/releases/tag/v2.0.0</link>
+            <sparkle:version>2.0.0</sparkle:version>
+            <sparkle:shortVersionString>2.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-            <pubDate>Mon, 04 May 2026 19:11:16 +0000</pubDate>
-            <description><![CDATA[See release notes at https://github.com/iamsumanp/DropShelf/releases/tag/v1.5.0]]></description>
+            <pubDate>Fri, 27 Nov 2026 11:24:10 +0000</pubDate>
+            <description><![CDATA[DropShelf v2.0.0 — a major update with new productivity tools, Capture Studio, custom workflows and redesigned settings.]]></description>
             <enclosure
-                url="https://github.com/iamsumanp/DropShelf/releases/download/v1.5.0/DropShelf.dmg"
-                sparkle:edSignature="yshY+UDBtCMQ5MoJ+nfgwCYMBvO7K0+0uC8SW6ZHfEwiuYu/SuU0k0SWmoAoNL5o3wYaCoQJ+booa99K06KoBw==" length="2535467"
+                url="https://github.com/giteshkukreja19/DropShelf/releases/download/v2.0.0/DropShelf.dmg"
+                sparkle:edSignature="0Wdia2LnZI9cIQEdzYPGrTVjhtWT25iOxHxKEeSgb59id4q5cnFEwBnalHq7uosgCxFDEFwSV9LHFCZbwN0JBw=="
+                length="3434874"
                 type="application/octet-stream" />
         </item>
     </channel>

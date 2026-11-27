@@ -86,9 +86,8 @@ struct ShelfItem: Identifiable, Equatable {
         let hash = SHA256.hash(data: Data(text.utf8))
             .map { String(format: "%02x", $0) }
             .joined().prefix(8)
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(safeStem)-\(hash).txt")
         do {
+            let url = try ShelfWritableStorage.stagingDirectory().appendingPathComponent("\(safeStem)-\(hash).txt")
             if !FileManager.default.fileExists(atPath: url.path) {
                 try text.write(to: url, atomically: true, encoding: .utf8)
             }
@@ -138,12 +137,8 @@ struct ShelfItem: Identifiable, Equatable {
     /// Works for RAW formats (CR2/NEF/ARW/DNG) too, via ImageIO.
     static func readImagePixelSize(url: URL) -> CGSize? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
-              let w = props[kCGImagePropertyPixelWidth] as? Int,
-              let h = props[kCGImagePropertyPixelHeight] as? Int,
-              w > 0, h > 0
-        else { return nil }
-        return CGSize(width: w, height: h)
+              let size = ImageActions.orientedSize(of: src) else { return nil }
+        return CGSize(width: CGFloat(size.width), height: CGFloat(size.height))
     }
 
     static func readPDFPageCount(url: URL) -> Int? {

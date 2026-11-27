@@ -29,6 +29,8 @@ final class ShelfManager: ObservableObject {
     let duplicateRejected = PassthroughSubject<UUID, Never>()
     // Emits the shelfID when a docked panel was dragged away from the edge
     // and should revert to collapsed state in-place.
+    let revealRequested = PassthroughSubject<UUID, Never>()
+    let dockRequested = PassthroughSubject<UUID, Never>()
     let undockRequested = PassthroughSubject<UUID, Never>()
     // Emits the key shelfID when Cmd-A is pressed in its panel; the
     // expanded view picks this up to select every shelf-root item.
@@ -53,11 +55,13 @@ final class ShelfManager: ObservableObject {
 
     private static let thumbnailCache: NSCache<NSString, CachedThumbnail> = {
         let cache = NSCache<NSString, CachedThumbnail>()
-        cache.countLimit = 256
+        cache.countLimit = 128
+        cache.totalCostLimit = 64 * 1024 * 1024
         return cache
     }()
 
     private let store = ShelfStore()
+    private var missingSweepInFlight = false
     private var cancellables = Set<AnyCancellable>()
 
     init() {
@@ -81,6 +85,7 @@ final class ShelfManager: ObservableObject {
         }
 
         $shelves
+            .removeDuplicates(by: { Self.samePersistedContent($0, $1) })
             .dropFirst()
             .debounce(for: .milliseconds(250), scheduler: DispatchQueue.main)
             .sink { [weak self] shelves in
@@ -153,21 +158,20 @@ final class ShelfManager: ObservableObject {
 
     /// Removes shelves whose last activity (most recent item add, falling back
     /// to shelf createdAt) is older than `days`. For each removed shelf, files
-    /// that the shelf owns (i.e. live under our temporary directory) are also
+    /// that the shelf owns (i.e. live in our private staging directory) are also
     /// deleted from disk; files originally from Finder or anywhere else are
     /// left untouched.
     /// Returns the IDs of the shelves that were pruned so callers can close
     /// any associated UI.
     @discardableResult
     func pruneShelves(olderThanDays days: Int) -> [UUID] {
-        guard days > 0 else { return [] }
-        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
-        let tempPath = FileManager.default.temporaryDirectory
-            .standardizedFileURL.path
+        guard days != 0 else { return [] }
+        let seconds = days < 0 ? -Double(days) * 60 : Double(days) * 86_400
+        let cutoff = Date().addingTimeInterval(-seconds)
 
         let expired = shelves.filter { shelf in
             // Pinned shelves are exempt from auto-expiry regardless of age.
-            guard !shelf.pinned else { return false }
+            guard !shelf.pinned, !ShelfToolRouter.activeShelves.contains(shelf.id) else { return false }
             let last = shelf.items.map(\.createdAt).max() ?? shelf.createdAt
             return last < cutoff
         }
@@ -177,7 +181,8 @@ final class ShelfManager: ObservableObject {
             for item in shelf.items {
                 guard let url = item.fileURL else { continue }
                 let path = url.standardizedFileURL.path
-                guard path.hasPrefix(tempPath) else { continue }
+                guard ShelfWritableStorage.isStagedFile(url) else { continue }
+                guard !shelves.contains(where: { other in other.id != shelf.id && other.items.contains(where: { $0.fileURL?.standardizedFileURL.path == path }) }) else { continue }
                 try? FileManager.default.removeItem(at: url)
             }
         }
@@ -196,13 +201,13 @@ final class ShelfManager: ObservableObject {
         guard let idx = index(of: shelfID) else { return }
         // Animate the insertion so dropped tiles slide/fade in instead of
         // popping (and so any layout reflow in the grid is smoothed too).
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
-            shelves[idx].items.append(item)
-        }
+        shelves[idx].items.append(item)
     }
 
-    func removeItem(id itemID: UUID, from shelfID: UUID) {
+    func removeItem(id itemID: UUID, from shelfID: UUID, recordUndo: Bool = false) {
         guard let idx = index(of: shelfID) else { return }
+        guard let item = shelves[idx].items.first(where: { $0.id == itemID }) else { return }
+        if recordUndo { undoSnapshot = .removeItem(shelfID: shelfID, item: item) }
         shelves[idx].items.removeAll { $0.id == itemID }
     }
 
@@ -219,6 +224,7 @@ final class ShelfManager: ObservableObject {
 
     enum UndoableAction {
         case clearShelf(shelfID: UUID, items: [ShelfItem])
+        case removeItem(shelfID: UUID, item: ShelfItem)
         /// `trashedURLs` is the original→trashed map returned by
         /// `NSWorkspace.shared.recycle`; empty when the item was a text
         /// snippet or a row removal that didn't touch the filesystem.
@@ -231,6 +237,7 @@ final class ShelfManager: ObservableObject {
         var menuTitle: String {
             switch self {
             case .clearShelf: return L("undo.clear-shelf")
+            case .removeItem: return "Undo Remove from Shelf"
             case .moveToTrash(_, let items, _):
                 return items.count <= 1
                     ? L("undo.move-to-trash")
@@ -252,11 +259,16 @@ final class ShelfManager: ObservableObject {
         guard let snapshot = undoSnapshot else { return }
         undoSnapshot = nil
         switch snapshot {
+        case .removeItem(let shelfID, let item):
+            guard let idx = index(of: shelfID), !shelves[idx].items.contains(where: { $0.id == item.id }) else { return }
+            if let url = item.fileURL, !FileManager.default.fileExists(atPath: url.path) || containsFile(url: url, in: shelfID) { return }
+            shelves[idx].items.append(item)
         case .clearShelf(let shelfID, let items):
             guard let idx = index(of: shelfID) else { return }
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
-                shelves[idx].items.append(contentsOf: items)
+            let restored = items.filter { item in
+                !shelves[idx].items.contains(where: { $0.id == item.id }) && (item.fileURL.map { !containsFile(url: $0, in: shelfID) && FileManager.default.fileExists(atPath: $0.path) } ?? true)
             }
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { shelves[idx].items.append(contentsOf: restored) }
         case .moveToTrash(let shelfID, let items, let trashedURLs):
             // Move trashed files back to their original location before
             // re-adding the rows; an item whose backing file failed to
@@ -278,22 +290,65 @@ final class ShelfManager: ObservableObject {
         }
     }
 
-    /// Drops items whose backing file is gone (e.g. moved to Trash from
-    /// Finder while the shelf was open). Text items have no fileURL and are
-    /// always kept. Returns the number of items removed.
-    @discardableResult
-    func pruneMissingFiles() -> Int {
-        let fm = FileManager.default
-        var removed = 0
-        for sIdx in shelves.indices {
-            let before = shelves[sIdx].items.count
-            shelves[sIdx].items.removeAll { item in
-                guard let url = item.fileURL else { return false }
-                return !fm.fileExists(atPath: url.path)
+    /// Refresh only confirmed missing paths. Filesystem work can block for
+    /// disconnected/cloud volumes, so it must not run on the UI thread.
+    func scheduleMissingFileSweep() {
+        guard !missingSweepInFlight, !isDragging, !DragInitiatorView.hasActiveDrag else { return }
+        let candidates: [(UUID, URL)] = shelves.flatMap { shelf in
+            shelf.items.compactMap { item in
+                guard item.type != .text, let url = item.fileURL else { return nil }
+                return (item.id, url)
             }
-            removed += before - shelves[sIdx].items.count
         }
-        return removed
+        guard !candidates.isEmpty else { return }
+        missingSweepInFlight = true
+        Task { @MainActor [weak self] in
+            let missing = await Task.detached(priority: .utility) {
+                candidates.filter { _, url in Self.confirmedMissing(url) }
+            }.value
+            guard let self else { return }
+            self.missingSweepInFlight = false
+            guard !self.isDragging, !DragInitiatorView.hasActiveDrag, !missing.isEmpty else { return }
+            let byID = Dictionary(missing, uniquingKeysWith: { first, _ in first })
+            var next = self.shelves
+            var changed = false
+            for index in next.indices {
+                let previous = next[index].items.count
+                next[index].items.removeAll { item in
+                    // A rename/transfer during the sweep must not remove the relocated item.
+                    guard let missingURL = byID[item.id], item.fileURL == missingURL else { return false }
+                    return true
+                }
+                changed = changed || previous != next[index].items.count
+            }
+            if changed { self.shelves = next }
+        }
+    }
+
+    nonisolated static func confirmedMissing(_ url: URL) -> Bool {
+        do { _ = try FileManager.default.attributesOfItem(atPath: url.path); return false }
+        catch let error as NSError {
+            // Permission/provider errors are not proof that the file vanished.
+            return error.domain == NSCocoaErrorDomain &&
+                (error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError)
+        }
+    }
+
+    private static func samePersistedContent(_ lhs: [Shelf], _ rhs: [Shelf]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy { pair in
+            let (a, b) = pair
+            guard a.id == b.id, a.name == b.name, a.pinned == b.pinned, a.accent == b.accent,
+                  a.createdAt == b.createdAt, a.items.count == b.items.count else { return false }
+            return zip(a.items, b.items).allSatisfy { pair in
+                let (x, y) = pair
+                return x.id == y.id && x.type == y.type && x.fileURL == y.fileURL && x.textContent == y.textContent && x.createdAt == y.createdAt
+            }
+        }
+    }
+
+    func flushStore() {
+        store.save(shelves: shelves, currentShelfID: shelves.last?.id)
     }
 
     enum RenameError: LocalizedError {
@@ -492,9 +547,8 @@ final class ShelfManager: ObservableObject {
                     let bitmap = NSBitmapImageRep(data: tiff),
                     let png = bitmap.representation(using: .png, properties: [:])
                 else { continue }
-                let url = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("Shelf-\(UUID().uuidString).png")
                 do {
+                    let url = try ShelfWritableStorage.stagingDirectory().appendingPathComponent("Shelf-\(UUID().uuidString).png")
                     try png.write(to: url)
                     addFile(url: url, to: shelfID)
                     added += 1
@@ -516,10 +570,11 @@ final class ShelfManager: ObservableObject {
 
     // MARK: - Thumbnails
 
-    private func updateThumbnail(id: UUID, image: NSImage, isIcon: Bool) {
+    private func updateThumbnail(id: UUID, expectedURL: URL, image: NSImage, isIcon: Bool) {
         for (sIdx, shelf) in shelves.enumerated() {
             if let iIdx = shelf.items.firstIndex(where: { $0.id == id }) {
                 let old = shelves[sIdx].items[iIdx]
+                guard old.fileURL == expectedURL else { return }
                 let new = ShelfItem(
                     id: old.id,
                     type: old.type,
@@ -535,9 +590,7 @@ final class ShelfManager: ObservableObject {
                 )
                 // Crossfade the skeleton/icon → real preview swap so it
                 // doesn't read as a hard pop.
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    shelves[sIdx].items[iIdx] = new
-                }
+                shelves[sIdx].items[iIdx] = new
                 return
             }
         }
@@ -546,7 +599,7 @@ final class ShelfManager: ObservableObject {
     private func generateThumbnail(for url: URL, replacing id: UUID) {
         let key = Self.cacheKey(for: url)
         if let cached = Self.thumbnailCache.object(forKey: key) {
-            updateThumbnail(id: id, image: cached.image, isIcon: cached.isIcon)
+            updateThumbnail(id: id, expectedURL: url, image: cached.image, isIcon: cached.isIcon)
             return
         }
 
@@ -558,8 +611,24 @@ final class ShelfManager: ObservableObject {
         // dark shelf and reads as a stray paper backdrop.
         let isImage = (try? url.resourceValues(forKeys: [.contentTypeKey])
             .contentType)?.conforms(to: .image) ?? false
-        let reprTypes: QLThumbnailGenerator.Request.RepresentationTypes =
-            isImage ? .all : .icon
+        if isImage {
+            Task { @MainActor [weak self] in
+                let preview = await Task.detached(priority: .utility) { ShelfImagePreview.load(url: url, maxPixel: 512) }.value
+                guard let self else { return }
+                if let preview {
+                    let image = NSImage(cgImage: preview, size: NSSize(width: CGFloat(preview.width), height: CGFloat(preview.height)))
+                    self.cacheAndApplyThumbnail(id: id, url: url, key: key, image: image, isIcon: false)
+                } else {
+                    self.loadQuickLookThumbnail(url: url, id: id, key: key, scale: scale, size: size, isImage: true)
+                }
+            }
+        } else {
+            loadQuickLookThumbnail(url: url, id: id, key: key, scale: scale, size: size, isImage: false)
+        }
+    }
+
+    private func loadQuickLookThumbnail(url: URL, id: UUID, key: NSString, scale: CGFloat, size: CGSize, isImage: Bool) {
+        let reprTypes: QLThumbnailGenerator.Request.RepresentationTypes = isImage ? .all : .icon
         let request = QLThumbnailGenerator.Request(
             fileAt: url,
             size: size,
@@ -570,11 +639,16 @@ final class ShelfManager: ObservableObject {
             guard let rep else { return }
             let image = rep.nsImage
             let isIcon = (rep.type == .icon)
-            Self.thumbnailCache.setObject(CachedThumbnail(image: image, isIcon: isIcon), forKey: key)
             Task { @MainActor [weak self] in
-                self?.updateThumbnail(id: id, image: image, isIcon: isIcon)
+                self?.cacheAndApplyThumbnail(id: id, url: url, key: key, image: image, isIcon: isIcon)
             }
         }
+    }
+
+    private func cacheAndApplyThumbnail(id: UUID, url: URL, key: NSString, image: NSImage, isIcon: Bool) {
+        let cost = image.representations.reduce(0) { $0 + max(1, $1.pixelsWide) * max(1, $1.pixelsHigh) * 4 }
+        Self.thumbnailCache.setObject(CachedThumbnail(image: image, isIcon: isIcon), forKey: key, cost: cost)
+        updateThumbnail(id: id, expectedURL: url, image: image, isIcon: isIcon)
     }
 
     private static func cacheKey(for url: URL) -> NSString {

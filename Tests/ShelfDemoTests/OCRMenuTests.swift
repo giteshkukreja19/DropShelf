@@ -3,53 +3,63 @@ import UniformTypeIdentifiers
 @testable import ShelfDemo
 
 final class OCRMenuTests: XCTestCase {
-    func test_makeSearchable_offered_for_pdfs_only() {
+    @MainActor
+    func test_makeSearchable_offered_for_pdfs_only() async {
         XCTAssertTrue(OCRMenu.shouldOfferMakeSearchable(forSourceUTIs: [UTType.pdf]))
         XCTAssertTrue(OCRMenu.shouldOfferMakeSearchable(forSourceUTIs: [.pdf, .pdf]))
     }
 
-    func test_makeSearchable_not_offered_for_images() {
+    @MainActor
+    func test_makeSearchable_not_offered_for_images() async {
         XCTAssertFalse(OCRMenu.shouldOfferMakeSearchable(forSourceUTIs: [.png]))
         XCTAssertFalse(OCRMenu.shouldOfferMakeSearchable(forSourceUTIs: [.heic]))
     }
 
-    func test_makeSearchable_not_offered_for_mixed() {
+    @MainActor
+    func test_makeSearchable_not_offered_for_mixed() async {
         XCTAssertFalse(
             OCRMenu.shouldOfferMakeSearchable(forSourceUTIs: [.pdf, .png])
         )
     }
 
-    func test_makeSearchable_not_offered_for_empty() {
+    @MainActor
+    func test_makeSearchable_not_offered_for_empty() async {
         XCTAssertFalse(OCRMenu.shouldOfferMakeSearchable(forSourceUTIs: []))
     }
 
-    func test_extractText_offered_for_pdfs() {
+    @MainActor
+    func test_extractText_offered_for_pdfs() async {
         XCTAssertTrue(OCRMenu.shouldOfferExtractText(forSourceUTIs: [.pdf]))
     }
 
-    func test_extractText_offered_for_images() {
+    @MainActor
+    func test_extractText_offered_for_images() async {
         XCTAssertTrue(OCRMenu.shouldOfferExtractText(forSourceUTIs: [.png]))
         XCTAssertTrue(OCRMenu.shouldOfferExtractText(forSourceUTIs: [.heic, .jpeg]))
     }
 
-    func test_extractText_offered_for_mixed_pdf_image() {
+    @MainActor
+    func test_extractText_offered_for_mixed_pdf_image() async {
         // Both PDFs and images are valid for Extract Text, so any mix works.
         XCTAssertTrue(
             OCRMenu.shouldOfferExtractText(forSourceUTIs: [.pdf, .png, .heic])
         )
     }
 
-    func test_extractText_not_offered_for_unsupported_uti() {
+    @MainActor
+    func test_extractText_not_offered_for_unsupported_uti() async {
         XCTAssertFalse(OCRMenu.shouldOfferExtractText(forSourceUTIs: [.plainText]))
     }
 
-    func test_extractText_not_offered_for_mixed_with_unsupported() {
+    @MainActor
+    func test_extractText_not_offered_for_mixed_with_unsupported() async {
         XCTAssertFalse(
             OCRMenu.shouldOfferExtractText(forSourceUTIs: [.pdf, .plainText])
         )
     }
 
-    func test_extractText_not_offered_for_empty() {
+    @MainActor
+    func test_extractText_not_offered_for_empty() async {
         XCTAssertFalse(OCRMenu.shouldOfferExtractText(forSourceUTIs: []))
     }
 }

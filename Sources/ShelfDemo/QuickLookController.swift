@@ -9,11 +9,13 @@ final class QuickLookController: NSResponder, QLPreviewPanelDataSource, QLPrevie
 
     private var currentURLs: [URL] = []
     private var pendingStartIndex: Int?
+    private var explicitURLs: [URL]?
 
     override init() { super.init() }
     required init?(coder: NSCoder) { nil }
 
-    func show(startingAt index: Int? = nil) {
+    func show(startingAt index: Int? = nil, urls: [URL]? = nil) {
+        explicitURLs = urls
         guard let panel = QLPreviewPanel.shared() else { return }
         pendingStartIndex = index
         if panel.isVisible {
@@ -33,7 +35,7 @@ final class QuickLookController: NSResponder, QLPreviewPanelDataSource, QLPrevie
     }
 
     private func reload(panel: QLPreviewPanel, preferredStart: Int?) {
-        currentURLs = (urlsProvider?() ?? []).filter {
+        currentURLs = (explicitURLs ?? urlsProvider?() ?? []).filter {
             FileManager.default.fileExists(atPath: $0.path)
         }
         panel.reloadData()
@@ -48,6 +50,7 @@ final class QuickLookController: NSResponder, QLPreviewPanelDataSource, QLPrevie
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 49 {
             let urls = urlsProvider?() ?? []
+            guard !urls.isEmpty else { super.keyDown(with: event); return }
             let start = max(0, urls.count - 1)
             toggle(startingAt: start)
             return
@@ -62,7 +65,7 @@ final class QuickLookController: NSResponder, QLPreviewPanelDataSource, QLPrevie
     }
 
     override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
-        currentURLs = (urlsProvider?() ?? []).filter {
+        currentURLs = (explicitURLs ?? urlsProvider?() ?? []).filter {
             FileManager.default.fileExists(atPath: $0.path)
         }
         panel.delegate = self
@@ -77,6 +80,7 @@ final class QuickLookController: NSResponder, QLPreviewPanelDataSource, QLPrevie
         panel.delegate = nil
         panel.dataSource = nil
         currentURLs = []
+        explicitURLs = nil
     }
 
     // MARK: - QLPreviewPanelDataSource

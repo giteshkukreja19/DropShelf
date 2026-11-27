@@ -31,18 +31,34 @@ struct ShelfStoreContents {
 }
 
 final class ShelfStore {
-    private let storeURL: URL = {
+    private let storeURL = ShelfDataLocation.root.appendingPathComponent("shelf.json")
+
+    static func rebaseCopiedStore(from source: URL, to target: URL) throws {
         let fm = FileManager.default
-        let base = (try? fm.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )) ?? fm.temporaryDirectory
-        let dir = base.appendingPathComponent("ShelfDemo", isDirectory: true)
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("shelf.json")
-    }()
+        let file = target.appendingPathComponent("shelf.json")
+        guard fm.fileExists(atPath: file.path) else { return }
+        let payload = try JSONDecoder().decode(PersistedStore.self, from: Data(contentsOf: file))
+        let prefix = source.standardizedFileURL.path + "/"
+        let shelves = try payload.shelves.map { shelf in
+            let items = try shelf.items.map { record -> PersistedShelfItem in
+                guard let bookmark = record.bookmark else { return record }
+                var stale = false
+                guard let url = try? URL(resolvingBookmarkData: bookmark, options: [], relativeTo: nil, bookmarkDataIsStale: &stale),
+                      url.standardizedFileURL.path.hasPrefix(prefix) else { return record }
+                let relative = String(url.standardizedFileURL.path.dropFirst(prefix.count))
+                let copied = target.appendingPathComponent(relative)
+                guard fm.fileExists(atPath: copied.path) else {
+                    // Missing original items are not turned into new links.
+                    if !fm.fileExists(atPath: url.path) { return record }
+                    throw CocoaError(.fileNoSuchFile)
+                }
+                let data = try copied.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+                return PersistedShelfItem(id: record.id, type: record.type, bookmark: data, text: record.text, createdAt: record.createdAt)
+            }
+            return PersistedShelf(id: shelf.id, createdAt: shelf.createdAt, items: items, name: shelf.name, pinned: shelf.pinned, accent: shelf.accent)
+        }
+        try JSONEncoder().encode(PersistedStore(version: payload.version, shelves: shelves, currentShelfID: payload.currentShelfID)).write(to: file, options: .atomic)
+    }
 
     // MARK: - Save
 

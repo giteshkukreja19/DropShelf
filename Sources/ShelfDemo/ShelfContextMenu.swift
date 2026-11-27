@@ -60,6 +60,34 @@ final class ShelfItemActions: NSObject {
         QuickLookController.shared.show(startingAt: start)
     }
 
+    @objc func copySelectedToFolder() { transferSelected(move: false) }
+    @objc func moveSelectedToFolder() { transferSelected(move: true) }
+    @objc func copySelectedToFavourite(_ sender: NSMenuItem) { if let folder = sender.representedObject as? URL { transferSelected(to: folder, move: false) } }
+    @objc func moveSelectedToFavourite(_ sender: NSMenuItem) { if let folder = sender.representedObject as? URL { transferSelected(to: folder, move: true) } }
+    private func transferSelected(move: Bool) {
+        ShelfFolderPicker.choose(owner: NSApp.keyWindow, initial: nil) { folder in
+            if let folder { self.transferSelected(to: folder, move: move) }
+        }
+    }
+    private func transferSelected(to folder: URL, move: Bool) {
+        guard let manager else { return }
+            var errors: [String] = []
+            for item in self.selectedItems {
+                guard let source = item.fileURL else { continue }
+                let dest = folder.appendingPathComponent(source.lastPathComponent)
+                let srcPath = source.resolvingSymlinksInPath().standardizedFileURL.path
+                let dstPath = dest.resolvingSymlinksInPath().standardizedFileURL.path
+                guard srcPath != dstPath, !dstPath.hasPrefix(srcPath + "/"), !FileManager.default.fileExists(atPath: dest.path) else {
+                    errors.append(source.lastPathComponent + ": destination exists or is inside the source"); continue
+                }
+                do {
+                    if move { try manager.renameItem(id: item.id, to: dest, in: self.shelfID) }
+                    else { try FileManager.default.copyItem(at: source, to: dest) }
+                } catch { errors.append(source.lastPathComponent + ": " + error.localizedDescription) }
+            }
+            if !errors.isEmpty { ShelfDataLocation.alert("Some items could not be transferred", errors.joined(separator: "\n")) }
+    }
+
     @objc func copyToPasteboard() {
         let pb = NSPasteboard.general
         pb.clearContents()
@@ -108,7 +136,7 @@ final class ShelfItemActions: NSObject {
               FileManager.default.fileExists(atPath: url.path),
               let manager else { return }
         let current = url.lastPathComponent
-        guard let newName = Self.promptRename(current: current),
+        guard let newName = Self.promptRename(current: current, preserveExtension: !item.isDirectory),
               newName != current else { return }
         let newURL = url.deletingLastPathComponent().appendingPathComponent(newName)
         do {
@@ -119,7 +147,7 @@ final class ShelfItemActions: NSObject {
     }
 
     @MainActor
-    private static func promptRename(current: String) -> String? {
+    private static func promptRename(current: String, preserveExtension: Bool) -> String? {
         let alert = NSAlert()
         alert.messageText = L("Rename")
         alert.informativeText = L("alert.rename.body")
@@ -146,7 +174,10 @@ final class ShelfItemActions: NSObject {
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return nil }
         let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard !trimmed.isEmpty, trimmed != ".", trimmed != "..", !trimmed.contains("/"), !trimmed.contains(":") else { return nil }
+        let ext = (current as NSString).pathExtension
+        if preserveExtension, !ext.isEmpty, (trimmed as NSString).pathExtension.isEmpty { return trimmed + "." + ext }
+        return trimmed
     }
 
     @MainActor
@@ -178,16 +209,10 @@ final class ShelfItemActions: NSObject {
     }
 
     @objc func removeFromShelf() {
-        manager?.removeItem(id: item.id, from: shelfID)
+        manager?.removeItem(id: item.id, from: shelfID, recordUndo: true)
     }
 
     // MARK: - Image actions
-
-    @objc func resizeImage() {
-        guard let url = item.fileURL else { return }
-        guard let max = ImageActionPrompts.resizeMaxDimension() else { return }
-        runImageAction { ImageActions.resize(url: url, maxDimension: max) }
-    }
 
     @objc func convertTo(_ sender: NSMenuItem) {
         guard let target = sender.representedObject as? ConversionTarget else { return }
@@ -255,46 +280,7 @@ final class ShelfItemActions: NSObject {
         }
     }
 
-    @objc func compressImage() {
-        guard let url = item.fileURL else { return }
-        guard let quality = ImageActionPrompts.compressionQuality() else { return }
-        runImageAction { ImageActions.compress(url: url, quality: quality) }
-    }
 
-    @objc func removeMetadata() {
-        guard let url = item.fileURL else { return }
-        runImageAction { ImageActions.removeMetadata(url: url) }
-    }
-
-    @objc func createPDF() {
-        guard let url = item.fileURL else { return }
-        runImageAction { ImageActions.createPDF(from: [url]) }
-    }
-
-    private func runImageAction(_ work: @escaping () -> URL?) {
-        let shelfRef = shelfID
-        let managerRef = manager
-        Task.detached {
-            let result = work()
-            await MainActor.run {
-                if let result {
-                    managerRef?.addFile(url: result, to: shelfRef)
-                } else {
-                    Self.showFailureAlert()
-                }
-            }
-        }
-    }
-
-    @MainActor
-    private static func showFailureAlert() {
-        let alert = NSAlert()
-        alert.messageText = L("Action Failed")
-        alert.informativeText = L("alert.action-failed.body")
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: L("OK"))
-        alert.runModal()
-    }
 }
 
 final class ShelfMenu: NSMenu {
@@ -358,6 +344,10 @@ enum ShelfContextMenu {
         )
         copy.target = actions
         menu.addItem(copy)
+        if actions.selectedItems.contains(where: { $0.fileURL != nil }) {
+            menu.addItem(ShelfFavouriteMenu.make(title: "Copy to…", symbol: "folder", target: actions, selector: #selector(ShelfItemActions.copySelectedToFavourite(_:)), direct: #selector(ShelfItemActions.copySelectedToFolder), enabled: true))
+            menu.addItem(ShelfFavouriteMenu.make(title: "Move to…", symbol: "folder.badge.arrow.forward", target: actions, selector: #selector(ShelfItemActions.moveSelectedToFavourite(_:)), direct: #selector(ShelfItemActions.moveSelectedToFolder), enabled: true))
+        }
 
         // Share
         let share = NSMenuItem(
@@ -366,8 +356,13 @@ enum ShelfContextMenu {
             keyEquivalent: ""
         )
         share.target = actions
-        menu.addItem(share)
-        menu.addItem(CloudSharing.menu(target: actions, action: #selector(ShelfItemActions.copyToCloud), enabled: hasFile || actions.selectedItems.contains { $0.fileURL != nil }))
+        let shareGroup = NSMenuItem(title: L("Share…"), action: nil, keyEquivalent: "")
+        shareGroup.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: nil)
+        let shareMenu = NSMenu()
+        shareMenu.addItem(share)
+        shareMenu.addItem(CloudSharing.menu(target: actions, action: #selector(ShelfItemActions.copyToCloud), enabled: hasFile || actions.selectedItems.contains { $0.fileURL != nil }))
+        shareGroup.submenu = shareMenu
+        menu.addItem(shareGroup)
 
         menu.addItem(.separator())
 
@@ -404,6 +399,7 @@ enum ShelfContextMenu {
             isImage: item.type == .image
         )
         menu.addItem(allActions)
+        ShelfActionPreferences.apply(to: menu, submenu: allActions)
 
         return menu
     }
@@ -499,30 +495,6 @@ enum ShelfContextMenu {
         )
         if appendedOCR > 0 {
             // No separator — sits in the same logical group as Convert to ▶.
-        }
-
-        if isImage && actions.selectedItems.count == 1 {
-            menu.addItem(sectionHeader(L("Image Actions")))
-
-            addItem(to: menu, title: L("Resize…"),
-                    selector: #selector(ShelfItemActions.resizeImage),
-                    symbol: "arrow.down.right.and.arrow.up.left",
-                    target: actions)
-            addItem(to: menu, title: L("Compress…"),
-                    selector: #selector(ShelfItemActions.compressImage),
-                    symbol: "arrow.down.to.line.compact",
-                    target: actions)
-            addItem(to: menu, title: L("Remove Metadata"),
-                    selector: #selector(ShelfItemActions.removeMetadata),
-                    symbol: "tag.slash",
-                    target: actions)
-            addItem(to: menu, title: L("Create PDF"),
-                    selector: #selector(ShelfItemActions.createPDF),
-                    symbol: "doc.badge.plus",
-                    target: actions)
-
-            menu.addItem(.separator())
-            menu.addItem(sectionHeader(L("General Actions")))
         }
 
         let open = NSMenuItem(

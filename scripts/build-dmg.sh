@@ -23,7 +23,7 @@ if [ -z "${SPARKLE_PUBLIC_KEY:-}" ]; then
 fi
 
 # Sparkle appcast feed — raw GitHub URL on main.
-SPARKLE_FEED_URL="https://raw.githubusercontent.com/iamsumanp/DropShelf/main/appcast.xml"
+SPARKLE_FEED_URL="https://raw.githubusercontent.com/giteshkukreja19/DropShelf/main/appcast.xml"
 
 APP_NAME="DropShelf"
 BIN_NAME="ShelfDemo"
@@ -31,7 +31,7 @@ BUNDLE_ID="com.boski.dropshelf"
 # VERSION drives both CFBundleShortVersionString and CFBundleVersion so the
 # value Sparkle compares (sparkle:version vs CFBundleVersion) lines up with
 # the same dotted form we publish in appcast.xml.
-VERSION="1.7.1"
+VERSION="2.0.0"
 MIN_OS="13.0"
 
 APP_DIR="dist/${APP_NAME}.app"
@@ -107,6 +107,8 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>LSMinimumSystemVersion</key><string>${MIN_OS}</string>
+  <key>NSCameraUsageDescription</key><string>Record your camera bubble when enabled.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Record your voice when enabled.</string>
   <key>LSUIElement</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>SUFeedURL</key><string>${SPARKLE_FEED_URL}</string>
@@ -134,9 +136,17 @@ echo "==> Building DMG"
 mkdir -p "${DMG_ROOT}"
 cp -R "${APP_DIR}" "${DMG_ROOT}/${APP_NAME}.app"
 ln -sfn /Applications "${DMG_ROOT}/Applications"
+cat > "${DMG_ROOT}/Read Me.txt" <<EOF
+DropShelf ${VERSION}
+
+Drag DropShelf.app onto Applications to install.
+Quit any running copy before replacing it.
+Your saved shelves and preferences remain in their existing data location.
+This build is ad-hoc signed and not notarized.
+EOF
 
 rm -f "${DMG_PATH}"
-hdiutil create -volname "${APP_NAME}" -srcfolder "${DMG_ROOT}" -ov -format UDZO "${DMG_PATH}"
+hdiutil create -volname "${APP_NAME} ${VERSION}" -srcfolder "${DMG_ROOT}" -ov -format UDZO "${DMG_PATH}"
 rm -rf "${DMG_ROOT}"
 
 echo

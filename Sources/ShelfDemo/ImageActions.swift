@@ -1,147 +1,123 @@
-import AppKit
+import Foundation
+import CoreGraphics
 import ImageIO
-import PDFKit
 import UniformTypeIdentifiers
 
+/// ImageIO-only operations: no NSImage focus, Retina points, or main-thread drawing.
+/// Each operation produces a new, verified file and never overwrites its input.
 enum ImageActions {
-    @discardableResult
-    static func resize(url: URL, maxDimension: CGFloat) -> URL? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+    static func error(_ message: String) -> NSError {
+        NSError(domain: "DropShelf.Image", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    static func orientedSize(of source: CGImageSource) -> ShelfPixelSize? {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              width > 0, height > 0 else { return nil }
+        let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        return [5, 6, 7, 8].contains(orientation)
+            ? ShelfPixelSize(width: height, height: width)
+            : ShelfPixelSize(width: width, height: height)
+    }
+
+    static func open(_ url: URL) throws -> CGImageSource {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 else {
+            throw error("Cannot decode \(url.lastPathComponent).")
+        }
+        return source
+    }
+
+    /// ImageIO applies EXIF orientation while downsampling. Exact pixel sizing
+    /// is verified and a final high-quality draw handles rounding/upscaling.
+    static func normalizedImage(_ source: CGImageSource, target: ShelfPixelSize) throws -> CGImage {
+        guard target.isSafeToRender, let original = orientedSize(of: source) else {
+            throw error("Image dimensions are invalid or exceed the 40 megapixel processing limit.")
+        }
+        let maxPixel = min(max(original.width, original.height), max(target.width, target.height))
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxDimension,
             kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceShouldCacheImmediately: true
         ]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
-        else { return nil }
-        let type = CGImageSourceGetType(source) ?? (UTType.png.identifier as CFString)
-        let dest = uniqueURL(basedOn: url, suffix: " (resized)")
-        return write(image: image, to: dest, type: type, properties: nil)
-    }
-
-    @discardableResult
-    static func compress(url: URL, quality: Double) -> URL? {
-        guard
-            let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-            let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
-        else { return nil }
-
-        let stem = url.deletingPathExtension().lastPathComponent + " (compressed)"
-        let candidate = url.deletingLastPathComponent()
-            .appendingPathComponent(stem)
-            .appendingPathExtension("jpg")
-        let dest = uniqueURL(at: candidate)
-        let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
-        return write(image: image, to: dest,
-                     type: UTType.jpeg.identifier as CFString,
-                     properties: props)
-    }
-
-    @discardableResult
-    static func removeMetadata(url: URL) -> URL? {
-        guard
-            let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-            let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
-        else { return nil }
-        let type = CGImageSourceGetType(source) ?? (UTType.png.identifier as CFString)
-        let dest = uniqueURL(basedOn: url, suffix: " (no metadata)")
-        // Passing nil properties writes the pixels without carrying EXIF/GPS/IPTC.
-        return write(image: image, to: dest, type: type, properties: nil)
-    }
-
-    @discardableResult
-    static func createPDF(from urls: [URL]) -> URL? {
-        let pdf = PDFDocument()
-        for url in urls {
-            guard let image = NSImage(contentsOf: url), let page = PDFPage(image: image) else {
-                continue
-            }
-            pdf.insert(page, at: pdf.pageCount)
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            throw error("Image decoder could not render the pixels.")
         }
-        guard pdf.pageCount > 0, let first = urls.first else { return nil }
-        let stem = first.deletingPathExtension().lastPathComponent
-        let candidate = first.deletingLastPathComponent()
-            .appendingPathComponent(stem)
-            .appendingPathExtension("pdf")
-        let dest = uniqueURL(at: candidate)
-        guard pdf.write(to: dest) else { return nil }
-        return dest
-    }
-
-    // MARK: - Helpers
-
-    private static func write(
-        image: CGImage,
-        to url: URL,
-        type: CFString,
-        properties: [CFString: Any]?
-    ) -> URL? {
-        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil)
-        else { return nil }
-        CGImageDestinationAddImage(destination, image, properties as CFDictionary?)
-        guard CGImageDestinationFinalize(destination) else { return nil }
-        return url
-    }
-
-    static func uniqueURL(basedOn url: URL, suffix: String) -> URL {
-        let ext = url.pathExtension
-        let stem = url.deletingPathExtension().lastPathComponent + suffix
-        var candidate = url.deletingLastPathComponent().appendingPathComponent(stem)
-        if !ext.isEmpty { candidate.appendPathExtension(ext) }
-        return uniqueURL(at: candidate)
-    }
-
-    static func uniqueURL(at url: URL) -> URL {
-        guard FileManager.default.fileExists(atPath: url.path) else { return url }
-        let ext = url.pathExtension
-        let stem = url.deletingPathExtension().lastPathComponent
-        var i = 2
-        while true {
-            var candidate = url.deletingLastPathComponent()
-                .appendingPathComponent("\(stem) \(i)")
-            if !ext.isEmpty { candidate.appendPathExtension(ext) }
-            if !FileManager.default.fileExists(atPath: candidate.path) {
-                return candidate
-            }
-            i += 1
+        if image.width == target.width && image.height == target.height { return image }
+        guard let context = CGContext(data: nil, width: target.width, height: target.height,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            throw error("Not enough memory to resize this image.")
         }
-    }
-}
-
-// MARK: - Prompts
-
-@MainActor
-enum ImageActionPrompts {
-    static func resizeMaxDimension(defaultValue: Int = 1024) -> CGFloat? {
-        let alert = NSAlert()
-        alert.messageText = L("Resize Image")
-        alert.informativeText = L("alert.resize.body")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
-        field.stringValue = String(defaultValue)
-        alert.accessoryView = field
-        alert.addButton(withTitle: L("Resize"))
-        alert.addButton(withTitle: L("Cancel"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        guard let value = Double(field.stringValue), value > 0 else { return nil }
-        return CGFloat(value)
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(target.width), height: CGFloat(target.height)))
+        guard let result = context.makeImage() else { throw error("Could not render resized image.") }
+        return result
     }
 
-    static func compressionQuality(defaultValue: Double = 0.75) -> Double? {
-        let alert = NSAlert()
-        alert.messageText = L("Compress Image")
-        alert.informativeText = L("alert.compress.body")
-        let slider = NSSlider(
-            value: defaultValue,
-            minValue: 0.1,
-            maxValue: 1.0,
-            target: nil,
-            action: nil
-        )
-        slider.frame = NSRect(x: 0, y: 0, width: 220, height: 24)
-        alert.accessoryView = slider
-        alert.addButton(withTitle: L("Compress"))
-        alert.addButton(withTitle: L("Cancel"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return slider.doubleValue
+    static func fullImage(_ url: URL) throws -> CGImage {
+        let source = try open(url)
+        guard let size = orientedSize(of: source) else { throw error("Cannot read image dimensions.") }
+        return try normalizedImage(source, target: size)
+    }
+
+    private static func originalFormat(_ source: CGImageSource, url: URL) -> UTType {
+        guard let identifier = CGImageSourceGetType(source), let type = UTType(identifier as String),
+              (CGImageDestinationCopyTypeIdentifiers() as? [String] ?? []).contains(type.identifier),
+              type.preferredFilenameExtension != nil else { return .png }
+        return type
+    }
+
+    static func resize(url: URL, width: Int, height: Int, allowEnlargement: Bool = false, folder: URL) throws -> URL {
+        let source = try open(url)
+        guard let size = orientedSize(of: source),
+              let target = size.fitted(maxWidth: width, maxHeight: height, allowEnlargement: allowEnlargement) else {
+            throw error("Enter dimensions between 1 and 16000 pixels.")
+        }
+        let image = try normalizedImage(source, target: target)
+        return try write(image, source: url, suffix: " (resized)", type: originalFormat(source, url: url), folder: folder)
+    }
+
+    static func convert(url: URL, format: String, folder: URL, quality: Double = 1) throws -> URL {
+        guard let type = UTType(filenameExtension: format), [.png, .jpeg, .heic, .tiff].contains(type) else {
+            throw error("Unsupported output format.")
+        }
+        return try write(fullImage(url), source: url, suffix: " (converted)", type: type, folder: folder, properties: [.jpeg, .heic].contains(type) ? [kCGImageDestinationLossyCompressionQuality: max(0.1, min(1, quality))] : nil)
+    }
+
+    static func compress(url: URL, quality: Double, folder: URL) throws -> URL {
+        guard quality.isFinite, (0.1...1).contains(quality) else { throw error("Invalid JPEG quality.") }
+        let image = try fullImage(url)
+        return try write(image, source: url, suffix: " (compressed)", type: .jpeg, folder: folder,
+                         properties: [kCGImageDestinationLossyCompressionQuality: quality])
+    }
+
+    static func removeMetadata(url: URL, folder: URL) throws -> URL {
+        let source = try open(url)
+        guard let size = orientedSize(of: source) else { throw error("Cannot read image dimensions.") }
+        let image = try normalizedImage(source, target: size)
+        return try write(image, source: url, suffix: " (no metadata)", type: originalFormat(source, url: url), folder: folder)
+    }
+
+    private static func write(_ image: CGImage, source: URL, suffix: String, type: UTType,
+                              folder: URL, properties: [CFString: Any]? = nil) throws -> URL {
+        let ext = type.preferredFilenameExtension ?? "png"
+        let preferred = folder.appendingPathComponent(source.deletingPathExtension().lastPathComponent + suffix).appendingPathExtension(ext)
+        let final = UniqueDestination.url(preferred: preferred)
+        let temporary = ShelfWritableStorage.temporarySibling(of: final)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        guard let encoder = CGImageDestinationCreateWithURL(temporary as CFURL, type.identifier as CFString, 1, nil) else {
+            throw error("Cannot create the image encoder. Check the output folder and format.")
+        }
+        CGImageDestinationAddImage(encoder, image, properties as CFDictionary?)
+        guard CGImageDestinationFinalize(encoder) else { throw error("The image encoder could not save the file.") }
+        guard let verification = CGImageSourceCreateWithURL(temporary as CFURL, nil),
+              let pixels = orientedSize(of: verification), pixels.width == image.width, pixels.height == image.height else {
+            throw error("The generated file did not pass pixel-size verification.")
+        }
+        try FileManager.default.moveItem(at: temporary, to: final)
+        return final
     }
 }

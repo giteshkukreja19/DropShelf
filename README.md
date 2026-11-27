@@ -1,5 +1,34 @@
 # DropShelf
 
+
+## What's New in v2.0.0
+
+- Capture Studio for screen recording.
+- Custom Actions and reusable workflows.
+- Intelligent Shelf Names.
+- Folder Monitoring.
+- Favourite file locations.
+- Improved image and document tools.
+- Customizable keyboard shortcuts.
+- Configurable storage location.
+- Redesigned native macOS settings.
+- Automatic light and dark appearance.
+- Improved shelf interactions and animations.
+- Updated Sparkle update configuration.
+- Stability and performance improvements.
+
+### Compatibility
+
+- Apple Silicon Macs (M1 and newer).
+- macOS 13 or later, with newer macOS versions required for some features.
+- All 41 automated tests passed.
+
+### Download
+
+[Download DropShelf v2.0.0](https://github.com/giteshkukreja19/DropShelf/releases/tag/v2.0.0)
+
+
+
 A free, open-source macOS shelf for files. Drag stuff in, drop it out wherever you need it later.
 
 It's an exact clone of [Dropover](https://dropoverapp.com/) — same shake-to-summon shelf, same drop-anywhere-to-collect workflow, same drag-out-to-deliver behavior — except free.
@@ -42,13 +71,13 @@ Dropover is a great paid app. DropShelf is the same idea, written from scratch a
 
 ### Pre-built DMG
 
-Latest release: <https://github.com/iamsumanp/DropShelf/releases/latest>
+Latest release: <https://github.com/giteshkukreja19/DropShelf/releases/latest>
 
 One-liner install:
 
 ```sh
 curl -L -o ~/Downloads/DropShelf.dmg \
-  https://github.com/iamsumanp/DropShelf/releases/latest/download/DropShelf.dmg
+  https://github.com/giteshkukreja19/DropShelf/releases/latest/download/DropShelf.dmg
 open ~/Downloads/DropShelf.dmg
 # Drag DropShelf.app to /Applications, eject the DMG, then:
 xattr -dr com.apple.quarantine /Applications/DropShelf.app
@@ -62,7 +91,7 @@ The `xattr` step is one-time per machine — the DMG is ad-hoc signed (no Apple 
 Requires macOS 13+ and the Swift toolchain that ships with Xcode 15+ (Swift 5.9).
 
 ```sh
-git clone https://github.com/iamsumanp/DropShelf.git
+git clone https://github.com/giteshkukreja19/DropShelf.git
 cd DropShelf
 
 # Run for development:
@@ -114,10 +143,6 @@ DropShelf doesn't ask for any special permissions. It uses macOS's stock drag pa
 ## Status
 
 Personal project. Works for me. PRs welcome but no guarantees about responsiveness.
-
-## License
-
-MIT. See `LICENSE`.
 
 ## Credits
 

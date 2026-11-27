@@ -50,7 +50,11 @@ final class ShareCoordinator: NSObject, NSSharingServicePickerDelegate, NSSharin
         switch name {
         case "AirDrop": service = NSSharingService(named: .sendViaAirDrop)
         case "Messages": service = NSSharingService(named: .composeMessage)
-        case "Mail": service = NSSharingService(named: .composeEmail)
+        case "Mail":
+            if UserDefaults.standard.string(forKey: "shelf.emailProvider") != "System Mail" {
+                return openGmail(values: values)
+            }
+            service = NSSharingService(named: .composeEmail)
         case "WhatsApp": service = NSSharingService.sharingServices(forItems: values).first { $0.title.localizedCaseInsensitiveContains("WhatsApp") }
         default: return false
         }
@@ -89,10 +93,46 @@ final class ShareCoordinator: NSObject, NSSharingServicePickerDelegate, NSSharin
         return true
     }
 
+    // Gmail's compose URL cannot attach local files. Keep the shelf available
+    // so the user can drag the original files into the browser composer.
+    private func openGmail(values: [Any]) -> Bool {
+        guard !values.isEmpty,
+              let url = URL(string: "https://mail.google.com/mail/u/0/#inbox?compose=new") else { return false }
+        let files = values.compactMap { $0 as? URL }.filter { $0.isFileURL && FileManager.default.fileExists(atPath: $0.path) }
+        guard !files.isEmpty || values.contains(where: { $0 is String || $0 is URL }) else { return false }
+        ShelfSmartAttach.report("Mail action received \(values.count) item(s), \(files.count) readable local file(s).")
+        let origin = ShelfSmartAttach.sourceFrame()
+        guard NSWorkspace.shared.open(url) else {
+            ShelfSmartAttach.report("Unable to open Gmail. Attach manually.")
+            let alert = NSAlert()
+            alert.messageText = "Unable to open Gmail"
+            alert.informativeText = "Open Gmail in your browser and attach the files from your shelf."
+            alert.runModal()
+            return false
+        }
+        DragInitiatorView.preserveShelfForCurrentDrag()
+        let enabled = UserDefaults.standard.bool(forKey: "shelf.smartAttach")
+        if !enabled {
+            ShelfSmartAttach.report("Smart Attach is disabled. Attach manually.")
+        } else if files.count == 1 {
+            ShelfSmartAttach.start(file: files[0], origin: origin)
+        } else if files.isEmpty {
+            ShelfSmartAttach.report("No readable local file received from Mail action. Attach manually.")
+        } else {
+            ShelfSmartAttach.report("Multiple files received; automatic attachment currently supports one file. Attach manually.")
+        }
+        return true
+    }
+
     nonisolated func sharingService(_ sharingService: NSSharingService, didFailToShareItems items: [Any], error: Error) {
+        let nsError = error as NSError
+        let cancelled = (nsError.domain == NSCocoaErrorDomain && nsError.code == NSUserCancelledError)
+            || (nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled)
+            || (nsError.domain == NSOSStatusErrorDomain && nsError.code == -128)
         let message = error.localizedDescription
         Task { @MainActor in
             self.activeService = nil
+            guard !cancelled else { return }
             let alert = NSAlert()
             alert.messageText = "Sharing failed"
             alert.informativeText = message + " Your shelf files remain unchanged."

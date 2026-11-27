@@ -54,6 +54,10 @@ struct InstantActionsAnchor: NSViewRepresentable {
         private var timer: Timer?
         private var panel: NSPanel?
         private var lastNear = Date.distantPast
+        private var lastFrame: NSRect?
+        private var lastMovement = Date.distantPast
+        private var needsFreshHover = true
+        private var lastMouse: NSPoint?
         func setValues(_ values: @escaping () -> [Any]) { state.values = values }
         func start() {
             let t = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
@@ -72,18 +76,41 @@ struct InstantActionsAnchor: NSViewRepresentable {
             if state.expanded { state.expanded = false }
         }
         private func tick() {
-            guard enabled, let source = anchor?.window, source.isVisible, !source.isMiniaturized else { hide(); return }
+            guard enabled, let source = anchor?.window, source.isVisible, !source.isMiniaturized else {
+                hide(); lastFrame = nil; lastNear = .distantPast
+                needsFreshHover = true; lastMouse = nil
+                return
+            }
             let shelf = source.frame
+            let mouse = NSEvent.mouseLocation
+            let movedMouse = lastMouse.map { hypot(mouse.x - $0.x, mouse.y - $0.y) > 0.5 } ?? false
+            lastMouse = mouse
+            if let old = lastFrame, old != shelf {
+                lastFrame = shelf
+                lastMovement = Date()
+                lastNear = .distantPast
+                needsFreshHover = true
+                hide()
+                return
+            }
+            lastFrame = shelf
+            guard Date().timeIntervalSince(lastMovement) >= 0.25 else { hide(); return }
             let screen = source.screen?.visibleFrame ?? shelf
             let x = max(screen.minX, min(shelf.midX - 84, screen.maxX - 168))
             let below = shelf.minY - 50
             // Flip above the shelf only when there is no usable space below.
             let y = below >= screen.minY ? below : min(shelf.maxY + 8, screen.maxY - 42)
             let frame = NSRect(x: x, y: y, width: 168, height: 42)
-            let mouse = NSEvent.mouseLocation
-            let near = shelf.union(frame).insetBy(dx: -22, dy: -22).contains(mouse)
-            if near { lastNear = Date() }
-            guard near || Date().timeIntervalSince(lastNear) < 0.35 else { hide(); return }
+            let overShelf = shelf.insetBy(dx: -6, dy: -6).contains(mouse)
+            let overBar = panel?.isVisible == true && frame.insetBy(dx: -8, dy: -8).contains(mouse)
+            if needsFreshHover {
+                guard overShelf && movedMouse else { hide(); return }
+                needsFreshHover = false
+            }
+            if overShelf || overBar { lastNear = Date() }
+            guard overShelf || overBar || Date().timeIntervalSince(lastNear) < 0.20 else {
+                hide(); needsFreshHover = true; return
+            }
             if panel == nil {
                 let p = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
                 p.isOpaque = false; p.backgroundColor = .clear; p.hasShadow = false
@@ -107,6 +134,8 @@ private struct InstantShareButton: View {
     let symbol: String
     let values: () -> [Any]
     @State private var targeted = false
+    @AppStorage("shelf.emailProvider") private var emailProvider = "Gmail"
+    @AppStorage("shelf.smartAttach") private var smartAttach = false
     var body: some View {
         Button {
             _ = ShareCoordinator.shared.performInstant(name, values: values())
@@ -118,8 +147,8 @@ private struct InstantShareButton: View {
         }
         .buttonStyle(.plain)
             .overlay(ShelfDropTarget(isTargeted: $targeted, allowDrop: { true }, preferredOperation: .copy, onDrop: perform))
-            .help(name)
-            .accessibilityLabel(name)
+            .help(name == "Mail" && emailProvider == "Gmail" ? (smartAttach ? "Smart Attach in Gmail (experimental)" : "Open Gmail Compose, then drag files from the shelf to attach") : name)
+            .accessibilityLabel(name == "Mail" && emailProvider == "Gmail" ? "Open Gmail Compose" : name)
     }
     private func perform(_ pb: NSPasteboard) -> Bool {
         var values: [Any] = []

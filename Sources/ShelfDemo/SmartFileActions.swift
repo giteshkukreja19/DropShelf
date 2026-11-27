@@ -1,33 +1,53 @@
 import AppKit
 import PDFKit
+import CoreGraphics
+import ImageIO
 import UniformTypeIdentifiers
 
 @MainActor
 enum SmartFileActions {
-    enum Action: String {
+    enum Action: String, Sendable {
         case splitPDF = "Split PDF into Pages…", extractPages = "Extract / Reorder PDF Pages…", deletePages = "Delete PDF Pages…", compressPDF = "Compress PDF…", protectPDF = "Password Protect PDF…", wordPDF = "Convert Word to PDF…"
         case pdfWord = "Convert PDF to Word (.docx)…"
-        case mergePDF = "Merge PDFs…", combinedPDF = "Create Combined PDF…", imagePDF = "Create PDF…", mergeWord = "Merge Word Documents…", rotatePDF = "Rotate PDF Pages 90°…", extractPDF = "Extract PDF Text…", wordText = "Extract Word Text…", stitch = "Stitch Images…", resize = "Resize Images…", compress = "Compress Images…", metadata = "Remove Image Metadata"
+        case mergePDF = "Merge PDFs…", combinedPDF = "Create Combined PDF…", imagePDF = "Create PDF…", mergeWord = "Merge Word Documents…", rotatePDF = "Rotate PDF Pages 90°…", extractPDF = "Extract PDF Text…", wordText = "Extract Word Text…", stitch = "Stitch Images…", resize = "Resize Images…", compress = "Compress Images…", metadata = "Remove Image Metadata", convertImage = "Convert Image Format…"
     }
     static func files(_ items: [ShelfItem]) -> [URL] {
         items.compactMap(\.fileURL).filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
     }
-    static func image(_ u: URL) -> Bool { UTType(filenameExtension: u.pathExtension)?.conforms(to: .image) == true }
-    static func pdf(_ u: URL) -> Bool { u.pathExtension.lowercased() == "pdf" }
+    nonisolated static func image(_ u: URL) -> Bool { UTType(filenameExtension: u.pathExtension)?.conforms(to: .image) == true }
+    nonisolated static func pdf(_ u: URL) -> Bool { u.pathExtension.lowercased() == "pdf" }
     static func word(_ u: URL) -> Bool { u.pathExtension.lowercased() == "docx" }
     static func options(_ urls: [URL]) -> [Action] {
         guard !urls.isEmpty else { return [] }
         if urls.allSatisfy(pdf) { return (urls.count > 1 ? [.mergePDF] : []) + [.rotatePDF, .extractPDF] + (urls.count == 1 ? [.splitPDF, .extractPages, .deletePages, .compressPDF, .protectPDF, .pdfWord] : []) }
         if urls.allSatisfy(word) { return (urls.count > 1 ? [.mergeWord] : []) + [.wordText, .wordPDF] }
-        if urls.allSatisfy(image) { return [.imagePDF, .resize, .compress, .metadata] + (urls.count > 1 ? [.stitch] : []) }
+        if urls.allSatisfy(image) { return [.imagePDF, .resize, .compress, .convertImage, .metadata] + (urls.count > 1 ? [.stitch] : []) }
         if urls.count > 1 && urls.allSatisfy({ pdf($0) || image($0) }) { return [.combinedPDF] }
         return []
     }
     static func append(to menu: NSMenu, items: [ShelfItem], target: AnyObject, selector: Selector) {
         let urls = files(items)
-        guard urls.count == items.count else { return }
-        let actions = options(urls)
-        guard !actions.isEmpty else { return }
+        let actions = urls.count == items.count ? options(urls) : []
+        let archiveURLs = items.compactMap(\.fileURL)
+        let canArchive = !items.isEmpty && archiveURLs.count == items.count && archiveURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) }
+        var appended = false
+        do {
+            let presets = ShelfCustomAction.load().filter { preset in
+                preset.enabled && preset.valid && (["zip", "move", "copy", "open", "rename"].contains(preset.kind) ? canArchive : preset.kind == "ocr" ? (urls.count == items.count && !urls.isEmpty && urls.allSatisfy(image)) : preset.action.map { actions.contains($0) } == true)
+            }
+            if !presets.isEmpty {
+                let entry = NSMenuItem(title: "Custom Actions", action: nil, keyEquivalent: "")
+                entry.isEnabled = false; menu.addItem(entry)
+                for preset in presets {
+                    let item = NSMenuItem(title: preset.name, action: selector, keyEquivalent: "")
+                    item.target = target; item.representedObject = preset.id.uuidString
+                    menu.addItem(item)
+                }
+                appended = true
+                if !actions.isEmpty { menu.addItem(.separator()) }
+            }
+        }
+        if !actions.isEmpty { let heading = NSMenuItem(title: urls.allSatisfy(image) ? "Image Actions" : "Document Actions", action: nil, keyEquivalent: ""); heading.isEnabled = false; menu.addItem(heading) }
         for action in actions {
             let row = NSMenuItem(title: action.rawValue, action: selector, keyEquivalent: "")
             row.target = target
@@ -35,192 +55,242 @@ enum SmartFileActions {
             row.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
             menu.addItem(row)
         }
-        menu.addItem(.separator())
+        if appended || !actions.isEmpty { menu.addItem(.separator()) }
+        let general = NSMenuItem(title: "General Actions", action: nil, keyEquivalent: ""); general.isEnabled = false; menu.addItem(general)
     }
     static func run(_ sender: NSMenuItem, items: [ShelfItem], manager: ShelfManager, shelfID: UUID) {
-        guard let raw = sender.representedObject as? String, let action = Action(rawValue: raw) else { return }
-        var urls = files(items)
+        guard let raw = sender.representedObject as? String else { return }
+        let urls = files(items)
+        if let preset = ShelfCustomAction.load().first(where: { $0.id.uuidString == raw && $0.enabled }) {
+            if ["zip", "move", "copy", "open", "rename", "ocr"].contains(preset.kind) {
+                let selected = items.compactMap(\.fileURL)
+                guard !selected.isEmpty, selected.count == items.count,
+                      selected.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else { return }
+                ShelfPresetExecutor.run(preset, items: items, manager: manager, shelfID: shelfID)
+                return
+            }
+            guard preset.valid, !urls.isEmpty, urls.count == items.count, let action = preset.action,
+                  options(urls).contains(action) else { return }
+            ShelfToolRouter.open(action: action, urls: urls, shelfID: shelfID, preset: preset)
+            return
+        }
+        guard let action = Action(rawValue: raw) else { return }
         guard urls.count == items.count, options(urls).contains(action) else { return }
         if action == .wordPDF && PDFToolkit.libreOffice == nil { failure("Install LibreOffice in Applications, then try again."); return }
-        if [.splitPDF, .extractPages, .deletePages, .compressPDF, .protectPDF].contains(action) {
-            guard let url = urls.first, let doc = PDFDocument(url: url), !doc.isLocked, doc.pageCount > 0 else { failure("Cannot read PDF."); return }
-            do {
-                if action == .splitPDF {
-                    let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
-                    guard panel.runModal() == .OK, let folder = panel.url else { return }
-                    let output = folder.appendingPathComponent("Split PDF-" + UUID().uuidString, isDirectory: true)
-                    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
-                    var complete = false
-                    defer { if !complete { try? FileManager.default.removeItem(at: output) } }
-                    var generated: [URL] = []
-                    for i in 0..<doc.pageCount {
-                        let dest = output.appendingPathComponent("Page-\(i+1).pdf")
-                        try PDFToolkit.subset(doc, indices: [i]).write(to: dest, options: .atomic)
-                        guard PDFDocument(url: dest)?.pageCount == 1 else { throw PDFToolkit.error("Invalid split output.") }
-                        generated.append(dest)
+        if [.resize, .compress, .convertImage, .metadata].contains(action) {
+            ImageToolPanel.present(action: action, urls: urls, manager: manager, shelfID: shelfID)
+        } else {
+            DocumentToolPanel.present(action: action, urls: urls, manager: manager, shelfID: shelfID)
+        }
+    }
+
+    nonisolated static func documentExtension(_ action: Action) -> String {
+        if action == .mergeWord || action == .pdfWord { return "docx" }
+        if [.extractPDF, .wordText].contains(action) { return "txt" }
+        if action == .stitch { return "png" }
+        return "pdf"
+    }
+
+    // Output is always a new file. The selected folder is optional; the default
+    // is a fresh app-owned directory, never the source folder or a stale save location.
+    static func performDocument(_ action: Action, urls: [URL], name: String, folder: URL?, pages: String,
+                                dpi: Double, password: String, flag: DocumentCancellation, stitchColumns: Int = 1, stitchRows: Int = 0) async throws -> [URL] {
+        try flag.check()
+        guard !urls.isEmpty, options(urls).contains(action) else { throw PDFToolkit.error("No compatible files selected.") }
+        let base = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !base.isEmpty, !base.hasPrefix("."), !base.contains("/"), !base.contains(":"), !base.contains("\u{0}"), base.utf8.count <= 200 else {
+            throw PDFToolkit.error("Enter a valid output name.")
+        }
+        let root = try folder ?? ShelfWritableStorage.newFolder("Output")
+        let ext = documentExtension(action)
+        let dest = root.appendingPathComponent(base.lowercased().hasSuffix("." + ext) ? base : base + "." + ext)
+        if action == .splitPDF, let url = urls.first {
+            let output = root.appendingPathComponent(base, isDirectory: true)
+            return try await Task.detached(priority: .userInitiated) {
+                guard let doc = PDFDocument(url: url), !doc.isLocked, doc.pageCount > 0 else { throw PDFToolkit.error("Cannot read PDF.") }
+                try flag.check()
+                try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+                var complete = false
+                var generated: [URL] = []
+                defer {
+                    if !complete {
+                        for file in generated { try? FileManager.default.removeItem(at: file) }
+                        if (try? FileManager.default.contentsOfDirectory(atPath: output.path).isEmpty) == true {
+                            try? FileManager.default.removeItem(at: output)
+                        }
                     }
-                    complete = true
-                    for dest in generated { _ = manager.addFile(url: dest, to: shelfID) }
-                    return
                 }
-                let data: Data
+                for i in 0..<doc.pageCount {
+                    try flag.check()
+                    let file = output.appendingPathComponent("Page-\(i + 1).pdf")
+                    try ShelfWritableStorage.commit(PDFToolkit.subset(doc, indices: [i]), to: file)
+                    generated.append(file)
+                    guard PDFDocument(url: file)?.pageCount == 1 else { throw PDFToolkit.error("Invalid split output.") }
+                }
+                try flag.check(); complete = true; return generated
+            }.value
+        }
+        guard !FileManager.default.fileExists(atPath: dest.path),
+              !urls.contains(where: { $0.resolvingSymlinksInPath().standardizedFileURL == dest.resolvingSymlinksInPath().standardizedFileURL }) else {
+            throw PDFToolkit.error("An output with this name already exists. Choose a different name to preserve all files.")
+        }
+        let data: Data
+        if action == .pdfWord {
+            data = try await Task.detached(priority: .userInitiated) {
+                try PDFWordConverter.convert(urls[0], cancelled: { flag.isCancelled() })
+            }.value
+        } else if action == .wordPDF {
+            data = try await Task.detached(priority: .userInitiated) {
+                try PDFToolkit.wordPDF(urls, cancelled: { flag.isCancelled() })
+            }.value
+        } else if [.extractPages, .deletePages, .compressPDF, .protectPDF].contains(action) {
+            data = try await Task.detached(priority: .userInitiated) {
+                guard let doc = PDFDocument(url: urls[0]), !doc.isLocked, doc.pageCount > 0 else { throw PDFToolkit.error("Cannot read PDF.") }
+                try flag.check()
                 switch action {
                 case .extractPages, .deletePages:
-                    guard let input = PDFToolkit.prompt(action.rawValue, detail: "Enter pages or ranges, e.g. 3,1,5-7. Originals are kept.") else { return }
-                    let chosen = try PDFToolkit.pages(input, count: doc.pageCount)
+                    let chosen = try PDFToolkit.pages(pages, count: doc.pageCount)
                     let indices = action == .deletePages ? (0..<doc.pageCount).filter { !chosen.contains($0) } : chosen
-                    data = try PDFToolkit.subset(doc, indices: indices)
+                    return try PDFToolkit.subset(doc, indices: indices)
                 case .compressPDF:
-                    guard let input = PDFToolkit.prompt("Compress PDF", detail: "Enter resolution: 72–200 DPI. Rasterizes pages; searchable text, links and forms may be lost. Output size is not guaranteed.", initial: "120"), let dpi = Double(input), (72...200).contains(dpi) else { return }
-                    let panel = NSSavePanel(); panel.allowedContentTypes = [.pdf]; panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + "-compressed.pdf"
-                    guard panel.runModal() == .OK, let dest = panel.url else { return }
-                    guard dest.resolvingSymlinksInPath().standardizedFileURL != url.resolvingSymlinksInPath().standardizedFileURL else { throw PDFToolkit.error("Choose a different output file.") }
-                    background(title: "Compressing PDF", destination: dest, manager: manager, shelfID: shelfID) { cancelled in
-                        guard let input = PDFDocument(url: url), !input.isLocked else { throw PDFToolkit.error("Cannot read PDF.") }
-                        let bytes = try PDFToolkit.compress(input, dpi: CGFloat(dpi), quality: 0.55, cancelled: cancelled)
-                        guard PDFDocument(data: bytes)?.pageCount == input.pageCount else { throw PDFToolkit.error("Invalid compressed output.") }
-                        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, bytes.count >= size { throw PDFToolkit.error("Compressed copy is not smaller. Try a lower resolution.") }
-                        return bytes
+                    guard (72...200).contains(dpi) else { throw PDFToolkit.error("Choose a resolution from 72 to 200 DPI.") }
+                    let bytes = try PDFToolkit.compress(doc, dpi: CGFloat(dpi), quality: 0.55, cancelled: { flag.isCancelled() })
+                    guard PDFDocument(data: bytes)?.pageCount == doc.pageCount else { throw PDFToolkit.error("Invalid compressed output.") }
+                    if let size = try? urls[0].resourceValues(forKeys: [.fileSizeKey]).fileSize, bytes.count >= size {
+                        throw PDFToolkit.error("Compressed copy is not smaller. Try a lower resolution.")
                     }
-                    return
+                    return bytes
                 case .protectPDF:
-                    guard let password = PDFToolkit.prompt("Password Protect PDF", detail: "Enter a nonempty password to open the new PDF.", secure: true), !password.isEmpty else { return }
-                    guard let protected = doc.dataRepresentation(options: [PDFDocumentWriteOption.userPasswordOption: password, PDFDocumentWriteOption.ownerPasswordOption: UUID().uuidString]), PDFDocument(data: protected)?.isLocked == true else { throw PDFToolkit.error("Could not verify PDF encryption.") }
-                    data = protected
-                default: return
+                    guard !password.isEmpty, let bytes = doc.dataRepresentation(options: [PDFDocumentWriteOption.userPasswordOption: password, PDFDocumentWriteOption.ownerPasswordOption: UUID().uuidString]),
+                          PDFDocument(data: bytes)?.isLocked == true else { throw PDFToolkit.error("Could not verify PDF encryption.") }
+                    return bytes
+                default: throw PDFToolkit.error("Unsupported PDF action.")
                 }
-                let panel = NSSavePanel(); panel.allowedContentTypes = [.pdf]; panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + "-edited.pdf"
-                guard panel.runModal() == .OK, let dest = panel.url else { return }
-                guard dest.resolvingSymlinksInPath().standardizedFileURL != url.resolvingSymlinksInPath().standardizedFileURL else { throw PDFToolkit.error("Choose a different output file.") }
-                try data.write(to: dest, options: .atomic); _ = manager.addFile(url: dest, to: shelfID)
-            } catch { failure(error.localizedDescription) }
-            return
+            }.value
+        } else if [.mergePDF, .rotatePDF, .extractPDF, .imagePDF, .combinedPDF].contains(action) {
+            // PDFKit and CoreGraphics objects stay within the worker.
+            data = try await Task.detached(priority: .userInitiated) { try pdfOutput(action, urls, flag: flag) }.value
+        } else if action == .stitch {
+            data = try await Task.detached(priority: .userInitiated) { try stitchedImage(urls, flag: flag, columns: stitchColumns, rows: stitchRows) }.value
+        } else {
+            // Word attributed-string import can require the main thread.
+            data = try wordOutput(action, urls, flag: flag)
         }
-        if [.resize, .compress, .metadata].contains(action) {
-            let dimension = action == .resize ? ImageActionPrompts.resizeMaxDimension() : nil
-            let quality = action == .compress ? ImageActionPrompts.compressionQuality() : nil
-            if action == .resize && dimension == nil || action == .compress && quality == nil { return }
-            for url in urls {
-                let result: URL?
-                switch action {
-                case .resize: result = dimension.flatMap { ImageActions.resize(url: url, maxDimension: $0) }
-                case .compress: result = quality.flatMap { ImageActions.compress(url: url, quality: $0) }
-                default: result = ImageActions.removeMetadata(url: url)
+        return try await Task.detached(priority: .userInitiated) {
+            try flag.check()
+            if ext == "pdf", action != .protectPDF {
+                guard let document = PDFDocument(data: data), document.pageCount > 0 else { throw PDFToolkit.error("Invalid PDF output.") }
+                if action == .imagePDF && document.pageCount != urls.count {
+                    throw PDFToolkit.error("One or more images did not become PDF pages.")
                 }
-                if let result { _ = manager.addFile(url: result, to: shelfID) } else { failure("Could not process \(url.lastPathComponent)") }
             }
-            return
-        }
-        if urls.count > 1 {
-            let alert = NSAlert(); alert.messageText = action.rawValue
-            alert.informativeText = "Choose the order using the numbered fields. Originals are kept."
-            let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading
-            var fields: [NSTextField] = []
-            for (i, url) in urls.enumerated() {
-                let field = NSTextField(string: String(i + 1)); field.widthAnchor.constraint(equalToConstant: 48).isActive = true
-                fields.append(field)
-                let label = NSTextField(labelWithString: url.lastPathComponent); label.lineBreakMode = .byTruncatingMiddle
-                label.widthAnchor.constraint(equalToConstant: 300).isActive = true
-                let row = NSStackView(views: [field, label]); stack.addArrangedSubview(row)
-            }
-            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: min(240, max(40, urls.count * 30))))
-            stack.frame = NSRect(x: 0, y: 0, width: 360, height: urls.count * 30); scroll.documentView = stack; scroll.hasVerticalScroller = true
-            alert.accessoryView = scroll; alert.addButton(withTitle: "Continue"); alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-            let order = fields.compactMap { Int($0.stringValue) }
-            guard order.count == urls.count, Set(order) == Set(1...urls.count) else { failure("Enter each position exactly once."); return }
-            urls = zip(order, urls).sorted { $0.0 < $1.0 }.map { $0.1 }
-        }
-        let ext = (action == .mergeWord || action == .pdfWord) ? "docx" : ([.extractPDF, .wordText].contains(action) ? "txt" : (action == .stitch ? "png" : "pdf"))
-        let panel = NSSavePanel(); panel.nameFieldStringValue = "DropShelf Output.\(ext)"; panel.allowedContentTypes = [UTType(filenameExtension: ext) ?? .data]
-        guard panel.runModal() == .OK, let dest = panel.url else { return }
-        guard !urls.contains(where: { $0.resolvingSymlinksInPath().standardizedFileURL == dest.resolvingSymlinksInPath().standardizedFileURL }) else { failure("Choose a different output file to preserve originals."); return }
-        if action == .pdfWord, let input = urls.first {
-            background(title: "Converting PDF to Word", destination: dest, manager: manager, shelfID: shelfID, validatePDF: false) { cancelled in
-                try PDFWordConverter.convert(input, cancelled: cancelled)
-            }
-            return
-        }
-        if action == .wordPDF {
-            let inputs = urls
-            background(title: "Converting Word to PDF", destination: dest, manager: manager, shelfID: shelfID) { cancelled in
-                try PDFToolkit.wordPDF(inputs, cancelled: cancelled)
-            }
-            return
-        }
-        do {
-            let data = try output(action, urls)
-            try data.write(to: dest, options: .atomic)
-            _ = manager.addFile(url: dest, to: shelfID)
-        } catch { failure(error.localizedDescription) }
-    }
-    private final class CancellationFlag: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value = false
-        func cancel() { lock.lock(); value = true; lock.unlock() }
-        func isCancelled() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
-    }
-    private static func background(title: String, destination: URL, manager: ShelfManager, shelfID: UUID, validatePDF: Bool = true, work: @escaping @Sendable (() -> Bool) throws -> Data) {
-        let flag = CancellationFlag()
-        let alert = NSAlert(); alert.messageText = title; alert.informativeText = "Processing locally. Please wait."
-        alert.addButton(withTitle: "Cancel")
-        let progress = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 260, height: 20))
-        progress.isIndeterminate = true; progress.style = .bar; progress.startAnimation(nil); alert.accessoryView = progress
-        // Modal event loop remains responsive while work runs on a worker queue.
-        var result: Result<Data, Error>?
-        DispatchQueue.global(qos: .userInitiated).async {
-            let outcome = Result { try work { flag.isCancelled() } }
-            DispatchQueue.main.async {
-                result = outcome
-                if !flag.isCancelled() { NSApp.stopModal(withCode: .alertSecondButtonReturn) }
-            }
-        }
-        let response = alert.runModal()
-        if response != .alertSecondButtonReturn { flag.cancel(); return }
-        do {
-            guard let result else { throw PDFToolkit.error("No output produced.") }
-            let data = try result.get()
-            if validatePDF {
-                guard let pdf = PDFDocument(data: data), pdf.pageCount > 0 else { throw PDFToolkit.error("Invalid PDF output.") }
-            }
-            try data.write(to: destination, options: .atomic)
-            _ = manager.addFile(url: destination, to: shelfID)
-        } catch { failure(error.localizedDescription) }
+            try flag.check()
+            try ShelfWritableStorage.commit(data, to: dest)
+            return [dest]
+        }.value
     }
     private static func failure(_ message: String) { let a = NSAlert(); a.messageText = "File Action Failed"; a.informativeText = message; a.runModal() }
-    private static func invalid(_ url: URL) -> NSError { NSError(domain: "DropShelf", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not read or convert \(url.lastPathComponent)"]) }
-    private static func output(_ action: Action, _ urls: [URL]) throws -> Data {
-        if action == .mergeWord || action == .wordText {
-            let merged = NSMutableAttributedString(string: "")
-            for url in urls {
-                let part = try NSAttributedString(url: url, options: [.documentType: NSAttributedString.DocumentType.officeOpenXML], documentAttributes: nil)
-                if merged.length > 0 { merged.append(NSAttributedString(string: "\n\n")) }; merged.append(part)
-            }
-            if action == .wordText { return Data(merged.string.utf8) }
-            return try merged.data(from: NSRange(location: 0, length: merged.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.officeOpenXML])
-        }
-        if action == .stitch {
-            let images = try urls.map { u -> NSImage in guard let i = NSImage(contentsOf: u), i.size.width > 0, i.size.height > 0 else { throw invalid(u) }; return i }
-            let width = images.map { $0.size.width }.max() ?? 0; let height = images.reduce(CGFloat(0)) { $0 + $1.size.height }
-            guard width * height <= 40_000_000, width <= 16000, height <= 16000 else { throw invalid(urls[0]) }
-            let canvas = NSImage(size: NSSize(width: width, height: height)); canvas.lockFocus(); var y = height
-            for i in images { y -= i.size.height; i.draw(in: NSRect(x: 0, y: y, width: i.size.width, height: i.size.height)) }; canvas.unlockFocus()
-            guard let tiff = canvas.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let data = rep.representation(using: .png, properties: [:]) else { throw invalid(urls[0]) }; return data
-        }
-        let result = PDFDocument(); var strings: [String] = []
+    nonisolated private static func pdfOutput(_ action: Action, _ urls: [URL], flag: DocumentCancellation) throws -> Data {
+        let result = PDFDocument()
+        var strings: [String] = []
         for url in urls {
+            try flag.check()
             if pdf(url) {
-                guard let doc = PDFDocument(url: url), !doc.isLocked, doc.pageCount > 0 else { throw invalid(url) }
-                if action == .extractPDF { strings.append(doc.string ?? ""); continue }
-                for index in 0..<doc.pageCount {
-                    guard let page = doc.page(at: index)?.copy() as? PDFPage else { throw invalid(url) }
-                    if action == .rotatePDF { page.rotation = (page.rotation + 90) % 360 }; result.insert(page, at: result.pageCount)
+                guard let document = PDFDocument(url: url), !document.isLocked, document.pageCount > 0 else {
+                    throw PDFToolkit.error("Cannot read \(url.lastPathComponent).")
                 }
+                if action == .extractPDF { strings.append(document.string ?? ""); continue }
+                for index in 0..<document.pageCount {
+                    try flag.check()
+                    guard let page = document.page(at: index)?.copy() as? PDFPage else { throw PDFToolkit.error("Cannot copy PDF page.") }
+                    if action == .rotatePDF { page.rotation = (page.rotation + 90) % 360 }
+                    result.insert(page, at: result.pageCount)
+                }
+            } else if action == .imagePDF || action == .combinedPDF {
+                let page = try autoreleasepool { try imagePDFPage(url) }
+                try flag.check()
+                result.insert(page, at: result.pageCount)
             } else {
-                guard let image = NSImage(contentsOf: url), let page = PDFPage(image: image) else { throw invalid(url) }; result.insert(page, at: result.pageCount)
+                throw PDFToolkit.error("Unsupported input: \(url.lastPathComponent).")
             }
         }
-        if action == .extractPDF { let text = strings.joined(separator: "\n\n"); guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw invalid(urls[0]) }; return Data(text.utf8) }
-        guard let data = result.dataRepresentation() else { throw invalid(urls[0]) }; return data
+        try flag.check()
+        if action == .extractPDF {
+            let text = strings.joined(separator: "\n\n")
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PDFToolkit.error("No searchable text. Try OCR first.") }
+            return Data(text.utf8)
+        }
+        guard result.pageCount > 0, let data = result.dataRepresentation() else { throw PDFToolkit.error("Cannot create PDF.") }
+        return data
+    }
+
+    nonisolated private static func imagePDFPage(_ url: URL) throws -> PDFPage {
+        let image = try ImageActions.fullImage(url)
+        let scale = min(CGFloat(1), 14400 / CGFloat(max(image.width, image.height)))
+        var box = CGRect(x: 0, y: 0, width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)
+        let data = NSMutableData()
+        guard let consumer = CGDataConsumer(data: data as CFMutableData),
+              let context = CGContext(consumer: consumer, mediaBox: &box, nil) else {
+            throw PDFToolkit.error("Cannot create a PDF page for \(url.lastPathComponent).")
+        }
+        context.beginPDFPage(nil)
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(box)
+        context.interpolationQuality = .high
+        context.draw(image, in: box)
+        context.endPDFPage()
+        context.closePDF()
+        guard let document = PDFDocument(data: data as Data), let page = document.page(at: 0)?.copy() as? PDFPage else {
+            throw PDFToolkit.error("Cannot read the generated PDF page.")
+        }
+        return page
+    }
+
+    nonisolated private static func stitchedImage(_ urls: [URL], flag: DocumentCancellation, columns: Int, rows: Int) throws -> Data {
+        guard (1...12).contains(columns), (0...12).contains(rows), !urls.isEmpty else { throw PDFToolkit.error("Invalid grid.") }
+        let rowCount = rows == 0 ? (urls.count + columns - 1) / columns : rows
+        guard urls.count <= rowCount * columns, rowCount <= 1000 else { throw PDFToolkit.error("Grid is too small or too large.") }
+        var sizes: [ShelfPixelSize] = []
+        var widths = Array(repeating: 0, count: columns), heights = Array(repeating: 0, count: rowCount)
+        for (i,url) in urls.enumerated() {
+            try flag.check()
+            let source = try ImageActions.open(url)
+            guard let size = ImageActions.orientedSize(of: source), size.isSafeToRender else { throw PDFToolkit.error("Cannot render image.") }
+            sizes.append(size)
+            widths[i % columns] = max(widths[i % columns], size.width)
+            heights[i / columns] = max(heights[i / columns], size.height)
+        }
+        let fallbackW = widths.max() ?? 1, fallbackH = heights.max() ?? 1
+        widths = widths.map { $0 == 0 ? fallbackW : $0 }; heights = heights.map { $0 == 0 ? fallbackH : $0 }
+        let width = widths.reduce(0,+), height = heights.reduce(0,+)
+        guard ShelfPixelSize(width: width, height: height).isSafeToRender,
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw PDFToolkit.error("Grid exceeds the supported dimensions or 40 megapixel limit.") }
+        context.clear(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        for (i,url) in urls.enumerated() {
+            try flag.check()
+            let col = i % columns, row = i / columns, size = sizes[i]
+            let x = widths.prefix(col).reduce(0,+) + (widths[col]-size.width)/2
+            let y = height - heights.prefix(row).reduce(0,+) - heights[row] + (heights[row]-size.height)/2
+            try autoreleasepool { let image = try ImageActions.fullImage(url); context.draw(image, in: CGRect(x: CGFloat(x), y: CGFloat(y), width: CGFloat(size.width), height: CGFloat(size.height))) }
+        }
+        try flag.check()
+        let data = NSMutableData()
+        guard let image = context.makeImage(), let destination = CGImageDestinationCreateWithData(data as CFMutableData, UTType.png.identifier as CFString, 1, nil) else { throw PDFToolkit.error("Cannot encode grid.") }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { throw PDFToolkit.error("Cannot save grid.") }
+        return data as Data
+    }
+
+    private static func wordOutput(_ action: Action, _ urls: [URL], flag: DocumentCancellation) throws -> Data {
+        guard action == .mergeWord || action == .wordText else { throw PDFToolkit.error("Unsupported document action.") }
+        let merged = NSMutableAttributedString(string: "")
+        for url in urls {
+            try flag.check()
+            let part = try NSAttributedString(url: url, options: [.documentType: NSAttributedString.DocumentType.officeOpenXML], documentAttributes: nil)
+            if merged.length > 0 { merged.append(NSAttributedString(string: "\n\n")) }
+            merged.append(part)
+        }
+        if action == .wordText { return Data(merged.string.utf8) }
+        return try merged.data(from: NSRange(location: 0, length: merged.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.officeOpenXML])
     }
 }

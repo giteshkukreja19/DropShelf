@@ -50,6 +50,7 @@ struct ShelfContainerView: View {
     var onIdleHideDocked: () -> Void = {}
     var onResize: (_ expanded: Bool) -> Void = { _ in }
     var onDockChanged: (_ docked: Bool) -> Void = { _ in }
+    var sizeForShelf: (Bool) -> NSSize = { _ in .zero }
 
     @AppStorage("shelf.activation") private var activation: ShelfActivation = .oneSecond
     @AppStorage("shelf.idleCollapseSeconds") private var idleCollapseSeconds = 0
@@ -61,9 +62,29 @@ struct ShelfContainerView: View {
     private let idleTimer = Timer.publish(every: 0.25, on: .main, in: .default).autoconnect()
     @Namespace private var ns
     @State private var isExpanded = false
+    @State private var toolRequest: ShelfToolRequest?
+    @State private var toolBusy = false
+    @State private var windowReference = ShelfWindowReference()
+    private var shelfWindow: NSWindow? { windowReference.window }
+    @State private var savedShelfFrame: NSRect?
+    @State private var toolOpeningFrame: NSRect?
+    @State private var toolResizeTask: Task<Void, Never>?
+    @State private var toolMeasuredHeight: CGFloat?
+    @Environment(\.accessibilityReduceMotion)
+    private var reduceMotion
+
     @State private var isDocked = false
     @AppStorage("shelf.instantActions") private var instantActions = true
+    @AppStorage("shelf.compactSizePercent") private var compactSizePercent = 100
+    @AppStorage("shelf.expandedSizePercent") private var expandedSizePercent = 100
+    @AppStorage("shelf.fixedExpandedSize") private var fixedExpandedSize = false
+    @AppStorage("shelf.fixedExpandedDimensions") private var fixedExpandedDimensions = ""
+    @AppStorage("shelf.intelligentNames") private var intelligentNames = false
+    @AppStorage("shelf.viewMode") private var shelfViewMode = "grid"
     @State private var dropTargeted = false
+    @State private var lastArrivalCount = 0
+    @State private var arrivalPulse = false
+    @State private var arrivalTask: Task<Void, Never>?
     @State private var selection: Set<UUID> = []
     // Sticky once true: lets the collapsed view show its X close button
     // after the user empties a populated shelf, but stays hidden while a
@@ -73,7 +94,9 @@ struct ShelfContainerView: View {
     private var items: [ShelfItem] { manager.items(of: shelfID) }
 
     private var transitionAnimation: Animation {
-        .spring(response: 0.5, dampingFraction: 0.78)
+        reduceMotion
+            ? .linear(duration: 0)
+            : .easeInOut(duration: 0.32)
     }
 
     var body: some View {
@@ -114,24 +137,63 @@ struct ShelfContainerView: View {
                 .transition(.opacity)
             }
         }
+        .opacity(toolRequest == nil ? 1 : 0)
+        .allowsHitTesting(toolRequest == nil)
+        .accessibilityHidden(toolRequest != nil)
+        .overlay {
+            if let request = toolRequest {
+                toolContent(request)
+                    .id(request.id)
+                    .transition(.opacity)
+                    .onPreferenceChange(ToolHeightPreference.self) { sizes in
+                        guard let header = sizes["header"], let body = sizes["body"], let footer = sizes["footer"], header > 0, body > 0, footer > 0 else { return }
+                        toolMeasuredHeight = ceil(header + body + footer + 69)
+                        scheduleToolResize()
+                    }
+                    .clipped()
+            }
+        }
+        .background(
+            ShelfWindowReader { window in
+                windowReference.window = window
+            }
+        )
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: .shelfToolRequested
+            )
+        ) { notification in
+            guard let request =
+                notification.object as? ShelfToolRequest,
+                request.shelfID == shelfID
+            else { return }
+
+            openTool(request)
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .overlay {
-            if !isDocked {
+            if !isDocked && toolRequest == nil {
                 DropTargetOverlay(active: dropTargeted && !manager.isDragging)
             }
         }
         // AppKit-level drop target — keeps the green "+" copy badge from
         // showing up on the cursor (SwiftUI's `.onDrop` always negotiates as
         // `.copy`, which paints the badge; we want a clean cursor instead).
-        .overlay(
-            ShelfDropTarget(
-                isTargeted: $dropTargeted,
-                allowDrop: { !manager.isDragging },
-                onDrop: handleDrop
-            )
-        )
-        .background(InstantActionsAnchor(enabled: instantActions && !isDocked && !isExpanded, values: {
+        .overlay {
+            if toolRequest == nil {
+                ShelfDropTarget(isTargeted: $dropTargeted,
+                    allowDrop: { !manager.isDragging }, onDrop: handleDrop)
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(arrivalPulse ? 0.72 : 0), lineWidth: 2)
+                .padding(1)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .background(InstantActionsAnchor(enabled: instantActions && !items.isEmpty && !isDocked && !isExpanded && toolRequest == nil, values: {
             items.compactMap { item -> Any? in
                 if let url = item.fileURL { return url }
                 return item.textContent
@@ -142,12 +204,32 @@ struct ShelfContainerView: View {
             resetIdleClock()
         }
         .onReceive(idleTimer) { _ in checkIdleShelf() }
+        .onChange(of: compactSizePercent) { _ in refreshPreferredSize() }
+        .onChange(of: expandedSizePercent) { _ in if isExpanded { refreshPreferredSize() } }
+        .onChange(of: fixedExpandedSize) { _ in if isExpanded { refreshPreferredSize() } }
+        .onChange(of: fixedExpandedDimensions) { _ in if isExpanded && fixedExpandedSize { refreshPreferredSize() } }
+        .onChange(of: shelfViewMode) { _ in if isExpanded && !fixedExpandedSize { refreshPreferredSize() } }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEndLiveResizeNotification)) { notification in
+            guard fixedExpandedSize, isExpanded, !isDocked, toolRequest == nil,
+                  let window = notification.object as? NSWindow, window === shelfWindow else { return }
+            let requested = CGSize(width: max(340, window.frame.width), height: max(280, window.frame.height))
+            if requested.width <= 4000, requested.height <= 4000 {
+                fixedExpandedDimensions = ShelfExpandedGeometry.encode(requested)
+                refreshPreferredSize()
+            }
+        }
         .onChange(of: isExpanded) { _ in resetIdleClock() }
         .onChange(of: isDocked) { _ in resetIdleClock() }
         .onChange(of: idleCollapseSeconds) { _ in resetIdleClock() }
         .onChange(of: idleDockSeconds) { _ in resetIdleClock() }
         .onChange(of: idleHideDockedSeconds) { _ in resetIdleClock() }
         .onChange(of: manager.isDragging) { _ in resetIdleClock() }
+        .onReceive(manager.revealRequested) { id in
+            if id == shelfID { resetIdleClock() }
+        }
+        .onReceive(manager.dockRequested) { id in
+            if id == shelfID { toggleDock(to: true) }
+        }
         .onReceive(manager.undockRequested) { id in
             guard id == shelfID, isDocked else { return }
             withAnimation(transitionAnimation) { isDocked = false }
@@ -165,10 +247,17 @@ struct ShelfContainerView: View {
         // empty case.
         .onChange(of: items.count) { newCount in
             resetIdleClock()
+            selection.formIntersection(Set(items.map(\.id)))
+            if newCount > 0 { hasEverHadItems = true }
+            let added = newCount > lastArrivalCount
+            lastArrivalCount = newCount
+            guard toolRequest == nil else { return }
+            if added { pulseArrival() }
             if newCount == 0, isExpanded {
                 toggle(to: false)
+            } else if isExpanded && !isDocked && !fixedExpandedSize {
+                onResize(true)
             }
-            if newCount > 0 { hasEverHadItems = true }
             if activation == .dragOnly, newCount > 0, !isDocked, !isExpanded {
                 toggle(to: true)
             }
@@ -177,19 +266,204 @@ struct ShelfContainerView: View {
             manager.setDropTargeted(shelfID: shelfID, newValue)
         }
         .onAppear {
+            lastArrivalCount = items.count
             if !items.isEmpty { hasEverHadItems = true }
         }
         .onDisappear {
+            ShelfToolRouter.activeShelves.remove(shelfID)
             // Make sure a panel that closes mid-drop doesn't leave its
             // shelf marked as a drop target forever.
             manager.setDropTargeted(shelfID: shelfID, false)
+            toolResizeTask?.cancel()
+            arrivalTask?.cancel()
         }
         .environmentObject(conversionService)
         .environmentObject(ocrService)
     }
 
+    @ViewBuilder
+    private func toolContent(
+        _ request: ShelfToolRequest
+    ) -> some View {
+        if [.resize, .compress, .convertImage, .metadata]
+            .contains(request.action) {
+            ImageToolPanel(
+                action: request.action,
+                urls: request.urls,
+                manager: manager,
+                shelfID: shelfID,
+                close: { closeTool() },
+                setBusy: { toolBusy = $0; if !$0 { scheduleToolResize() } }, owner: windowReference, preset: request.preset
+            )
+        } else {
+            DocumentToolPanel(
+                action: request.action,
+                urls: request.urls,
+                manager: manager,
+                shelfID: shelfID,
+                close: { closeTool() },
+                setBusy: { toolBusy = $0; if !$0 { scheduleToolResize() } }, owner: windowReference, preset: request.preset
+            )
+        }
+    }
+
+    private func openTool(_ request: ShelfToolRequest) {
+        guard toolRequest == nil, !ShelfToolRouter.activeShelves.contains(shelfID),
+              !isDocked,
+              let window = shelfWindow
+        else { return }
+
+        toolResizeTask?.cancel()
+        toolMeasuredHeight = nil
+        savedShelfFrame = window.frame
+        dropTargeted = false
+        ShelfToolRouter.activeShelves.insert(shelfID)
+
+        let imageTool = [
+            SmartFileActions.Action.resize,
+            .compress, .convertImage, .metadata
+        ].contains(request.action)
+
+        let screen = window.screen?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? window.frame
+
+        let width = min(
+            imageTool ? CGFloat(460) : CGFloat(520),
+            screen.width - 16
+        )
+
+        let height = min(
+            imageTool ? (request.action == .resize ? CGFloat(355) : CGFloat(315)) : CGFloat(min(540, 270 + 53 * min(request.urls.count, 5))),
+            screen.height - 16
+        )
+
+        let old = window.frame
+
+        let target = NSRect(
+            x: max(
+                screen.minX + 8,
+                min(old.midX - width / 2,
+                    screen.maxX - width - 8)
+            ),
+            y: max(
+                screen.minY + 8,
+                min(old.maxY - height,
+                    screen.maxY - height - 8)
+            ),
+            width: width,
+            height: height
+        )
+
+        toolOpeningFrame = target
+        window.makeKeyAndOrderFront(nil)
+
+        withAnimation(transitionAnimation) {
+            toolRequest = request
+        }
+
+        animateToolWindow(window, to: target)
+    }
+
+    private func closeTool() {
+        guard !toolBusy, toolRequest != nil else { return }
+        toolResizeTask?.cancel()
+        toolMeasuredHeight = nil
+        if items.isEmpty && isExpanded {
+            isExpanded = false
+            onResize(false) // update the app's expanded-state bookkeeping while tool resizing is guarded
+        }
+        withAnimation(transitionAnimation) {
+            toolRequest = nil
+        }
+
+        if let window = shelfWindow,
+           var frame = savedShelfFrame {
+
+            if let opening = toolOpeningFrame {
+                frame.origin.x +=
+                    window.frame.midX - opening.midX
+
+                frame.origin.y +=
+                    window.frame.maxY - opening.maxY
+            }
+
+            let size = sizeForShelf(isExpanded && !items.isEmpty)
+            if size.width > 0, size.height > 0 {
+                frame.origin.x += (frame.width - size.width) / 2
+                frame.origin.y += frame.height - size.height
+                frame.size = size
+            }
+            if let visible = window.screen?.visibleFrame {
+                frame = ShelfExpandedGeometry.clampedFrame(frame, in: visible)
+            }
+
+            animateToolWindow(window, to: frame)
+        }
+
+        toolOpeningFrame = nil
+
+        savedShelfFrame = nil
+        ShelfToolRouter.activeShelves.remove(shelfID)
+        resetIdleClock()
+
+    }
+
+    private func scheduleToolResize() {
+        toolResizeTask?.cancel()
+        guard toolRequest != nil, !toolBusy, toolMeasuredHeight != nil else { return }
+        toolResizeTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 360_000_000)
+            guard !Task.isCancelled, toolRequest != nil, !toolBusy,
+                  let window = shelfWindow, window.attachedSheet == nil,
+                  let measured = toolMeasuredHeight, let previous = toolOpeningFrame else { return }
+            let screen = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? window.frame
+            let height = min(max(200, measured), max(200, screen.height - 16))
+            guard abs(previous.height - height) > 2 else { return }
+            let current = window.frame
+            if var saved = savedShelfFrame {
+                saved.origin.x += current.midX - previous.midX
+                saved.origin.y += current.maxY - previous.maxY
+                savedShelfFrame = saved
+            }
+            var next = current
+            next.size.height = height
+            next.origin.y = max(screen.minY + 8, min(current.maxY - height, screen.maxY - height - 8))
+            toolOpeningFrame = next
+            animateToolWindow(window, to: next)
+        }
+    }
+
+    private func animateToolWindow(
+        _ window: NSWindow,
+        to frame: NSRect
+    ) {
+        if reduceMotion {
+            window.setFrame(frame, display: true)
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.32
+                context.allowsImplicitAnimation = true
+                window.animator().setFrame(
+                    frame, display: true
+                )
+            }
+        }
+    }
+
+    private func pulseArrival() {
+        guard !reduceMotion, !isDocked else { return }
+        arrivalTask?.cancel()
+        withAnimation(.easeOut(duration: 0.12)) { arrivalPulse = true }
+        arrivalTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.32)) { arrivalPulse = false }
+        }
+    }
+
     private func handleDrop(_ pasteboard: NSPasteboard) -> Bool {
-        if manager.isDragging { return false }
+        if manager.isDragging || toolRequest != nil { return false }
         let target = shelfID
 
         // 1. File URLs — covers both files and folders. Finder always vends
@@ -223,8 +497,10 @@ struct ShelfContainerView: View {
         ) as? [NSFilePromiseReceiver], !receivers.isEmpty {
             let queue = OperationQueue()
             queue.qualityOfService = .userInitiated
-            let dest = FileManager.default.temporaryDirectory
             for receiver in receivers {
+                let dest: URL
+                do { dest = try ShelfWritableStorage.newFolder("Imports") }
+                catch { NSLog("DropShelf import directory: \(error)"); continue }
                 receiver.receivePromisedFiles(
                     atDestination: dest,
                     options: [:],
@@ -256,9 +532,8 @@ struct ShelfContainerView: View {
                 let hash = SHA256.hash(data: png)
                     .map { String(format: "%02x", $0) }
                     .joined().prefix(16)
-                let tmp = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("Shelf-\(hash).png")
                 do {
+                    let tmp = try ShelfWritableStorage.stagingDirectory().appendingPathComponent("Shelf-\(hash).png")
                     if !FileManager.default.fileExists(atPath: tmp.path) {
                         try png.write(to: tmp)
                     }
@@ -293,7 +568,16 @@ struct ShelfContainerView: View {
         idleSince = ProcessInfo.processInfo.systemUptime
     }
 
+    private func refreshPreferredSize() {
+        guard toolRequest == nil, !isDocked, shelfWindow?.inLiveResize != true else { return }
+        onResize(isExpanded)
+    }
+
     private func checkIdleShelf() {
+        guard toolRequest == nil else {
+            resetIdleClock()
+            return
+        }
         let now = ProcessInfo.processInfo.systemUptime
         let gap = now - lastIdleTick
         lastIdleTick = now
@@ -322,7 +606,7 @@ struct ShelfContainerView: View {
     }
 
     private func toggle(to expanded: Bool) {
-        guard expanded != isExpanded else { return }
+        guard toolRequest == nil, expanded != isExpanded else { return }
         onResize(expanded)
         withAnimation(transitionAnimation) {
             isExpanded = expanded
@@ -330,7 +614,7 @@ struct ShelfContainerView: View {
     }
 
     private func toggleDock(to docked: Bool) {
-        guard docked != isDocked else { return }
+        guard toolRequest == nil, docked != isDocked else { return }
         onDockChanged(docked)
         withAnimation(transitionAnimation) {
             isDocked = docked
@@ -350,7 +634,7 @@ private struct DockedTabView: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(
-                        Color.white.opacity(dropTargeted ? 1 : (hovering ? 0.95 : 0.65))
+                        Color.primary.opacity(dropTargeted ? 1 : (hovering ? 0.95 : 0.65))
                     )
                     // Nudge the chevron to match the visible portion of the
                     // panel (right side is clipped past the screen edge).
@@ -383,6 +667,7 @@ enum ShelfViewMode: String {
 }
 
 private struct ExpandedShelfView: View {
+    @AppStorage("shelf.intelligentNames") private var intelligentNames = false
     let namespace: Namespace.ID
     @ObservedObject var manager: ShelfManager
     let shelfID: UUID
@@ -418,11 +703,12 @@ private struct ExpandedShelfView: View {
 
     private var items: [ShelfItem] { manager.items(of: shelfID) }
 
-    // Adaptive columns let the row pack as many cards as fit; LazyVGrid's
-    // .center alignment then centers the row when there are fewer items than
-    // columns (so 1 or 2 files don't pin to the left).
-    private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: 96, maximum: 116), spacing: 16, alignment: .top)]
+    // Use the same column capacity as the window height calculation.
+    // A short first row is centered, rather than reserving empty columns.
+    private func columns(width: CGFloat, count: Int) -> [GridItem] {
+        Array(repeating: GridItem(.fixed(ShelfExpandedGeometry.tileWidth),
+            spacing: ShelfExpandedGeometry.columnSpacing, alignment: .top),
+            count: ShelfExpandedGeometry.columns(contentWidth: width, count: count))
     }
 
     private var shelf: Shelf? { manager.shelf(id: shelfID) }
@@ -445,13 +731,13 @@ private struct ExpandedShelfView: View {
 
     private var headerPrimary: String {
         if let url = currentFolderURL { return url.lastPathComponent }
-        if let n = shelf?.name, !n.isEmpty { return n }
+        if let n = shelf?.displayShelfName(intelligent: intelligentNames) { return n }
         return countTitle
     }
 
     private var headerSubtitle: String {
         if inFolder {
-            let shelfTitle = (shelf?.name?.isEmpty == false ? shelf?.name : nil) ?? L("shelf.default-name")
+            let shelfTitle = shelf?.displayShelfName(intelligent: intelligentNames) ?? L("shelf.default-name")
             let parents = folderStack.dropLast().map(\.lastPathComponent)
             let crumbs = ([shelfTitle] + parents).joined(separator: " › ")
             let countLabel: String
@@ -472,7 +758,7 @@ private struct ExpandedShelfView: View {
             return sizes.count == chosen.count ? "\(count) · \(ShelfItem.format(bytes: sizes.reduce(0, +)))" : count
         }
         let size = manager.displayTotalSize(of: shelfID)
-        if shelf?.name?.isEmpty == false {
+        if shelf?.displayShelfName(intelligent: intelligentNames) != nil {
             return size == "—" ? countTitle : "\(countTitle) · \(size)"
         }
         return size
@@ -482,8 +768,15 @@ private struct ExpandedShelfView: View {
         VStack(spacing: 14) {
             header
             content
-            Spacer(minLength: 0)
             revealButton
+        }
+        .task(id: currentFolderURL) {
+            guard let url = currentFolderURL else { return }
+            while !Task.isCancelled {
+                loadFolderIfNeeded(url, refresh: true)
+                do { try await Task.sleep(nanoseconds: 2_000_000_000) }
+                catch { return }
+            }
         }
         // Native tile overlays own selection. A parent SwiftUI tap gesture
         // can also fire for those clicks and erase the existing selection.
@@ -527,24 +820,24 @@ private struct ExpandedShelfView: View {
                     if inFolder {
                         Image(systemName: "folder.fill")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.7))
+                            .foregroundStyle(Color.primary.opacity(0.7))
                     } else if let accent = shelf?.accent {
                         ShelfAccentBadge(accent: accent, size: 10)
                     }
                     Text(headerPrimary)
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.white)
+                        .foregroundStyle(Color.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     if !inFolder, shelf?.pinned == true {
                         Image(systemName: "pin.fill")
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.7))
+                            .foregroundStyle(Color.primary.opacity(0.7))
                     }
                 }
                 Text(headerSubtitle)
                     .font(.system(size: 12))
-                    .foregroundStyle(Color.white.opacity(0.55))
+                    .foregroundStyle(Color.primary.opacity(0.55))
                     .lineLimit(1)
                     .truncationMode(.head)
             }
@@ -578,7 +871,7 @@ private struct ExpandedShelfView: View {
                 )
             )
             if !inFolder {
-                ShelfActionMenu(manager: manager, shelfID: shelfID)
+                ShelfActionMenu(manager: manager, shelfID: shelfID, selection: selection)
             }
         }
     }
@@ -597,6 +890,9 @@ private struct ExpandedShelfView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background {
+            ShelfWindowDragHandle(onDoubleTap: onCollapse, onEdge: onDock)
+        }
         .clipped()
     }
 
@@ -630,17 +926,17 @@ private struct ExpandedShelfView: View {
                 ProgressView().progressViewStyle(.circular)
                 Text(L("Loading…"))
                     .font(.system(size: 11))
-                    .foregroundStyle(Color.white.opacity(0.55))
+                    .foregroundStyle(Color.primary.opacity(0.55))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if currentEntries.isEmpty {
             VStack(spacing: 8) {
                 Image(systemName: "tray")
                     .font(.system(size: 22, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(0.38))
+                    .foregroundStyle(Color.primary.opacity(0.38))
                 Text(L("Empty folder"))
                     .font(.system(size: 12))
-                    .foregroundStyle(Color.white.opacity(0.55))
+                    .foregroundStyle(Color.primary.opacity(0.55))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -700,15 +996,35 @@ private struct ExpandedShelfView: View {
         }
     }
 
-    private func loadFolderIfNeeded(_ url: URL) {
-        if folderContents[url] != nil || loadingFolders.contains(url) { return }
+    private func loadFolderIfNeeded(_ url: URL, refresh: Bool = false) {
+        if (!refresh && folderContents[url] != nil) || loadingFolders.contains(url) { return }
         loadingFolders.insert(url)
         Task.detached(priority: .userInitiated) {
             let entries = readDirectory(url: url)
             await MainActor.run {
-                folderContents[url] = entries
                 loadingFolders.remove(url)
+                guard let entries else { return }
+                let old = folderContents[url] ?? []
+                let ids = Dictionary(old.map { ($0.url, $0.id) }, uniquingKeysWith: { first, _ in first })
+                let stable = entries.map { entry in
+                    FolderEntry(id: ids[entry.url] ?? entry.id, url: entry.url,
+                                isDirectory: entry.isDirectory, displayName: entry.displayName,
+                                byteSize: entry.byteSize, pixelSize: entry.pixelSize)
+                }
+                if folderContents[url] != stable {
+                    folderContents[url] = stable
+                    if currentFolderURL == url { folderSelection.formIntersection(stable.map(\.id)) }
+                }
             }
+        }
+    }
+
+    @AppStorage("shelf.sortOrder") private var sortOrder = "Date Added"
+    private var sortedItems: [ShelfItem] {
+        switch sortOrder {
+        case "Name": return items.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+        case "Size": return items.sorted { ($0.byteSize ?? 0) > ($1.byteSize ?? 0) }
+        default: return Array(items.reversed())
         }
     }
 
@@ -718,9 +1034,10 @@ private struct ExpandedShelfView: View {
         // Newest-first in the expanded view so the just-dropped tile lands at
         // the top of the grid where the user is looking. Storage order stays
         // append-at-end (the collapsed stack still puts the newest tile on top).
-        let displayed = Array(items.reversed())
-        return ScrollView(.vertical, showsIndicators: false) {
-            LazyVGrid(columns: columns, alignment: .center, spacing: 18) {
+        let displayed = sortedItems
+        return GeometryReader { geometry in
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVGrid(columns: columns(width: geometry.size.width, count: displayed.count), alignment: .center, spacing: ShelfExpandedGeometry.rowSpacing) {
                 ForEach(displayed) { item in
                     DocumentGridItem(
                         item: item,
@@ -756,7 +1073,7 @@ private struct ExpandedShelfView: View {
                                 ocrService: ocrService
                             )
                         },
-                        onRemove: { manager.removeItem(id: item.id, from: target) },
+                        onRemove: { manager.removeItem(id: item.id, from: target, recordUndo: true) },
                         onClick: { modifiers in handleClick(itemID: item.id, modifiers: modifiers) },
                         onDragStart: {
                             manager.isDragging = true
@@ -773,6 +1090,9 @@ private struct ExpandedShelfView: View {
                 }
             }
             .padding(.vertical, 4)
+            .frame(minHeight: geometry.size.height, alignment: .top)
+            .background { ShelfWindowDragHandle(onDoubleTap: onCollapse, onEdge: onDock) }
+        }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
@@ -787,8 +1107,9 @@ private struct ExpandedShelfView: View {
     private var shelfList: some View {
         let target = shelfID
         let sel = $selection
-        let displayed = Array(items.reversed())
-        return ScrollView(.vertical, showsIndicators: false) {
+        let displayed = sortedItems
+        return GeometryReader { geometry in
+        ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(spacing: 2) {
                 ForEach(displayed) { item in
                     DocumentListItem(
@@ -824,7 +1145,7 @@ private struct ExpandedShelfView: View {
                                 ocrService: ocrService
                             )
                         },
-                        onRemove: { manager.removeItem(id: item.id, from: target) },
+                        onRemove: { manager.removeItem(id: item.id, from: target, recordUndo: true) },
                         onClick: { modifiers in handleClick(itemID: item.id, modifiers: modifiers) },
                         onDragStart: {
                             manager.isDragging = true
@@ -841,6 +1162,9 @@ private struct ExpandedShelfView: View {
                 }
             }
             .padding(.vertical, 4)
+            .frame(minHeight: geometry.size.height, alignment: .top)
+            .background { ShelfWindowDragHandle(onDoubleTap: onCollapse, onEdge: onDock) }
+        }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .environmentObject(conversionService)
@@ -848,8 +1172,9 @@ private struct ExpandedShelfView: View {
     }
 
     private var folderGrid: some View {
+        GeometryReader { geometry in
         ScrollView(.vertical, showsIndicators: false) {
-            LazyVGrid(columns: columns, alignment: .center, spacing: 18) {
+            LazyVGrid(columns: columns(width: geometry.size.width, count: currentEntries.count), alignment: .center, spacing: ShelfExpandedGeometry.rowSpacing) {
                 ForEach(currentEntries) { entry in
                     FolderEntryGridCell(
                         entry: entry,
@@ -862,6 +1187,9 @@ private struct ExpandedShelfView: View {
                 }
             }
             .padding(.vertical, 4)
+            .frame(minHeight: geometry.size.height, alignment: .top)
+            .background { ShelfWindowDragHandle(onDoubleTap: onCollapse, onEdge: onDock) }
+        }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -999,14 +1327,14 @@ private struct InlineNavigateChevron: View {
         Button(action: action) {
             Image(systemName: "chevron.right")
                 .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(Color.white.opacity(hovering ? 1.0 : 0.85))
+                .foregroundStyle(Color.primary.opacity(hovering ? 1.0 : 0.85))
                 .frame(width: 14, height: 14)
                 .background(
                     Circle()
-                        .fill(Color.white.opacity(hovering ? 0.22 : 0.12))
+                        .fill(Color.primary.opacity(hovering ? 0.22 : 0.12))
                 )
                 .overlay(
-                    Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
+                    Circle().strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.5)
                 )
                 .contentShape(Circle())
         }
@@ -1051,7 +1379,7 @@ struct FolderEntry: Identifiable, Equatable {
 /// it considers a package (`.app`, `.bundle`, but also some user-named dirs
 /// with extensions registered as packages — e.g. a folder called `dist.js`
 /// shows zero children even when it has gigabytes of content).
-private func readDirectory(url: URL) -> [FolderEntry] {
+private func readDirectory(url: URL) -> [FolderEntry]? {
     let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentTypeKey]
     let urls: [URL]
     do {
@@ -1063,7 +1391,7 @@ private func readDirectory(url: URL) -> [FolderEntry] {
     } catch {
         NSLog("Shelf: readDirectory failed for %@ — %@",
               url.path as NSString, error as NSError)
-        return []
+        return nil
     }
     let entries = urls.map { childURL -> FolderEntry in
         let values = try? childURL.resourceValues(forKeys: Set(keys))
@@ -1159,7 +1487,7 @@ private struct FolderEntryGridCell: View {
                 HStack(spacing: 4) {
                     Text(entry.displayName)
                         .font(.system(size: 11))
-                        .foregroundStyle(Color.white.opacity(0.92))
+                        .foregroundStyle(isSelected ? Color.white : Color.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     if entry.isDirectory {
@@ -1168,11 +1496,12 @@ private struct FolderEntryGridCell: View {
                 }
                 Text(metaText)
                     .font(.system(size: 10))
-                    .foregroundStyle(Color.white.opacity(isSelected ? 0.75 : 0.5))
+                    .foregroundStyle((isSelected ? Color.white.opacity(0.85) : Color.secondary))
                     .lineLimit(1)
             }
             .frame(width: max(size.width, Self.labelMinWidth))
         }
+        .fixedSize(horizontal: false, vertical: true)
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
         .background(
@@ -1201,7 +1530,7 @@ private struct FolderEntryGridCell: View {
                 Image(nsImage: thumb)
                     .resizable()
                     .interpolation(.high)
-                    .aspectRatio(contentMode: .fill)
+                    .aspectRatio(contentMode: .fit)
                     .frame(width: size.width, height: size.height)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .overlay(
@@ -1220,10 +1549,10 @@ private struct FolderEntryGridCell: View {
             }
         } else {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.white.opacity(0.08))
+                .fill(Color.primary.opacity(0.08))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
+                        .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
                 )
         }
     }
@@ -1280,7 +1609,7 @@ private struct FolderEntryListItem: View {
 
             Text(entry.displayName)
                 .font(.system(size: 12))
-                .foregroundStyle(Color.white.opacity(0.92))
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
 
@@ -1288,7 +1617,7 @@ private struct FolderEntryListItem: View {
 
             Text(metaText)
                 .font(.system(size: 10))
-                .foregroundStyle(Color.white.opacity(0.5))
+                .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
                 .lineLimit(1)
 
             if entry.isDirectory {
@@ -1306,7 +1635,7 @@ private struct FolderEntryListItem: View {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(isSelected
                       ? Color.accentColor
-                      : Color.white.opacity(hovering ? 0.06 : 0))
+                      : Color.primary.opacity(hovering ? 0.06 : 0))
         )
         .overlay(
             ShelfDragOverlay(
@@ -1345,10 +1674,10 @@ private struct FolderEntryListItem: View {
             }
         } else {
             ZStack {
-                Color.white.opacity(0.10)
+                Color.primary.opacity(0.10)
                 Image(systemName: entry.isDirectory ? "folder" : "doc")
                     .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(0.7))
+                    .foregroundStyle(Color.primary.opacity(0.7))
             }
         }
     }
@@ -1384,16 +1713,16 @@ private struct SelectAllButton: View {
                 Text(allSelected ? L("Deselect All") : L("Select All"))
                     .font(.system(size: 12, weight: .medium))
             }
-            .foregroundStyle(Color.white.opacity(enabled ? 0.92 : 0.4))
+            .foregroundStyle(Color.primary.opacity(enabled ? 0.92 : 0.4))
             .padding(.horizontal, 14)
             .frame(height: 32)
             .background(
                 Capsule(style: .continuous)
-                    .fill(Color.white.opacity(hovering && enabled ? 0.16 : 0.09))
+                    .fill(Color.primary.opacity(hovering && enabled ? 0.16 : 0.09))
             )
             .overlay(
                 Capsule(style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5)
+                    .strokeBorder(Color.primary.opacity(0.16), lineWidth: 0.5)
             )
             .scaleEffect(hovering && enabled ? 1.03 : 1.0)
         }
@@ -1473,7 +1802,8 @@ private struct DocumentGridItem: View {
                             NSWorkspace.shared.open(url)
                         }
                     },
-                    visibleCardSize: { size }
+                    visibleCardSize: { size },
+                    coversWholeShelf: { selectedURLsProvider().count == manager.items(of: shelfID).count }
                 )
             )
             .overlay(alignment: .topTrailing) {
@@ -1509,7 +1839,7 @@ private struct DocumentGridItem: View {
                 HStack(spacing: 4) {
                     Text(item.displayName)
                         .font(.system(size: 11))
-                        .foregroundStyle(Color.white.opacity(0.92))
+                        .foregroundStyle(isSelected ? Color.white : Color.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     if item.isDirectory {
@@ -1518,11 +1848,12 @@ private struct DocumentGridItem: View {
                 }
                 Text(item.displayMeta)
                     .font(.system(size: 10))
-                    .foregroundStyle(Color.white.opacity(isSelected ? 0.75 : 0.5))
+                    .foregroundStyle((isSelected ? Color.white.opacity(0.85) : Color.secondary))
                     .lineLimit(1)
             }
             .frame(width: max(size.width, Self.labelMinWidth))
         }
+        .fixedSize(horizontal: false, vertical: true)
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
         .background(
@@ -1542,11 +1873,11 @@ private struct DocumentGridItem: View {
             // skeleton instead and crossfade to the real thumbnail when it
             // arrives.
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.white.opacity(0.08))
+                .fill(Color.primary.opacity(0.08))
                 .frame(width: size.width, height: size.height)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
+                        .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
                 )
                 .transition(.opacity)
         } else if renderFlush, let thumb = item.thumbnail {
@@ -1554,7 +1885,7 @@ private struct DocumentGridItem: View {
                 Image(nsImage: thumb)
                     .resizable()
                     .interpolation(.high)
-                    .aspectRatio(contentMode: .fill)
+                    .aspectRatio(contentMode: .fit)
                     .frame(width: size.width, height: size.height)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .transition(.opacity)
@@ -1634,11 +1965,11 @@ private struct ViewModeToggle: View {
         .padding(2)
         .background(
             Capsule(style: .continuous)
-                .fill(Color.white.opacity(0.10))
+                .fill(Color.primary.opacity(0.10))
         )
         .overlay(
             Capsule(style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
         )
     }
 }
@@ -1660,12 +1991,12 @@ private struct ViewModeSegment: View {
         } label: {
             Image(systemName: systemName)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(active ? 0.98 : (hovering ? 0.85 : 0.55)))
+                .foregroundStyle(Color.primary.opacity(active ? 0.98 : (hovering ? 0.85 : 0.55)))
                 .frame(width: 26, height: 22)
                 .background(
                     Capsule(style: .continuous)
                         .fill(
-                            Color.white.opacity(
+                            Color.primary.opacity(
                                 active ? 0.20 : (hovering ? 0.10 : 0)
                             )
                         )
@@ -1705,7 +2036,7 @@ private struct DocumentListItem: View {
 
             Text(item.displayName)
                 .font(.system(size: 12))
-                .foregroundStyle(Color.white.opacity(0.92))
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
 
@@ -1713,7 +2044,7 @@ private struct DocumentListItem: View {
 
             Text(item.displayMeta)
                 .font(.system(size: 10))
-                .foregroundStyle(Color.white.opacity(isSelected ? 0.8 : 0.5))
+                .foregroundStyle((isSelected ? Color.white.opacity(0.85) : Color.secondary))
                 .lineLimit(1)
 
             ZStack {
@@ -1751,7 +2082,8 @@ private struct DocumentListItem: View {
                     if !WebDragLinks.open(item), let url = item.fileURL {
                         NSWorkspace.shared.open(url)
                     }
-                }
+                },
+                coversWholeShelf: { selectedURLsProvider().count == manager.items(of: shelfID).count }
             )
         )
         .overlay {
@@ -1776,7 +2108,7 @@ private struct DocumentListItem: View {
                 Image(nsImage: thumb)
                     .resizable()
                     .interpolation(.high)
-                    .aspectRatio(contentMode: .fill)
+                    .aspectRatio(contentMode: .fit)
             } else {
                 ZStack {
                     Color.white.opacity(0.97)
@@ -1789,17 +2121,17 @@ private struct DocumentListItem: View {
             }
         } else if item.type == .text {
             ZStack {
-                Color.white.opacity(0.10)
+                Color.primary.opacity(0.10)
                 Image(systemName: "text.alignleft")
                     .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(0.7))
+                    .foregroundStyle(Color.primary.opacity(0.7))
             }
         } else {
             ZStack {
-                Color.white.opacity(0.10)
+                Color.primary.opacity(0.10)
                 Image(systemName: "doc")
                     .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(0.7))
+                    .foregroundStyle(Color.primary.opacity(0.7))
             }
         }
     }
@@ -1850,7 +2182,7 @@ struct ShelfAccentBadge: View {
                 .fill(Color(nsColor: NSColor(hex: hex) ?? .systemGray))
                 .frame(width: size, height: size)
                 .overlay(
-                    Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
+                    Circle().strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.5)
                 )
         case .emoji(let glyph):
             Text(glyph)
@@ -1873,16 +2205,16 @@ private struct RevealInFinderButton: View {
                 Text(L("Reveal in Finder"))
                     .font(.system(size: 12, weight: .medium))
             }
-            .foregroundStyle(Color.white.opacity(enabled ? 0.92 : 0.4))
+            .foregroundStyle(Color.primary.opacity(enabled ? 0.92 : 0.4))
             .padding(.horizontal, 14)
             .frame(height: 32)
             .background(
                 Capsule(style: .continuous)
-                    .fill(Color.white.opacity(hovering && enabled ? 0.16 : 0.09))
+                    .fill(Color.primary.opacity(hovering && enabled ? 0.16 : 0.09))
             )
             .overlay(
                 Capsule(style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5)
+                    .strokeBorder(Color.primary.opacity(0.16), lineWidth: 0.5)
             )
             .scaleEffect(hovering && enabled ? 1.03 : 1.0)
         }

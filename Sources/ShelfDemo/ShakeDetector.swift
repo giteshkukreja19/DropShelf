@@ -29,8 +29,14 @@ final class ShakeDetector {
 
     // Tunables
     private let window: CFTimeInterval = 0.8
-    private let minReversals = 3           // ≥2 full back-and-forth sweeps
-    private let minTravelPerLeg: CGFloat = 12
+    private var minReversals: Int { UserDefaults.standard.string(forKey: "shelf.shakeSensitivity") == "Low" ? 4 : 3 }
+    private var minTravelPerLeg: CGFloat {
+        switch UserDefaults.standard.string(forKey: "shelf.shakeSensitivity") {
+        case "Low": return 18
+        case "High": return 7
+        default: return 12
+        }
+    }
     private let cooldown: CFTimeInterval = 0.8
 
     private var baseline: Int?
@@ -117,7 +123,10 @@ final class ShakeDetector {
         let mode = ShelfSummon(rawValue: UserDefaults.standard.string(forKey: "shelf.summon") ?? "instant") ?? .instant
         let timed = shouldSuppressAutomatic?() != true && (mode.delay.map { now - (dragStarted ?? now) >= $0 } ?? false)
         let shaken = mode == .shakeOnly || (UserDefaults.standard.object(forKey: "shelf.shakeEnabled") as? Bool ?? true)
-        guard timed || (shaken && detectShake() && now - lastShakeTime > cooldown) else { return }
+        let flags = NSEvent.modifierFlags
+        let modifier = UserDefaults.standard.string(forKey: "shelf.modifierActivation")
+        let modified = (modifier == "Shift" && flags.contains(.shift)) || (modifier == "Option" && flags.contains(.option)) || (modifier == "Control" && flags.contains(.control))
+        guard timed || modified || (shaken && detectShake() && now - lastShakeTime > cooldown) else { return }
         dragSummoned = true
         lastShakeTime = now
         let token = gesture

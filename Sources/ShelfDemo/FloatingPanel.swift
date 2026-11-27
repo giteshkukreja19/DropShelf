@@ -44,12 +44,16 @@ final class FloatingPanel<Content: View>: NSPanel, ShelfPanelMarker {
         blur.blendingMode = .behindWindow
         blur.state = .active
         blur.isEmphasized = false
-        blur.appearance = NSAppearance(named: .vibrantDark)
+        blur.appearance = nil
+
         blur.translatesAutoresizingMaskIntoConstraints = false
 
         let hosting = FirstMouseHostingView(
             rootView: FloatingPanelContent(content: content)
         )
+        // The app controls panel frames. Do not let the hosting view add
+        // intrinsic/minimum content-size constraints during a tool morph.
+        hosting.sizingOptions = []
         hosting.translatesAutoresizingMaskIntoConstraints = false
 
         root.addSubview(blur)
@@ -97,6 +101,8 @@ private final class FloatingPanelRootView: NSView {
 
 private struct FloatingPanelContent<Content: View>: View {
     let content: Content
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     init(@ViewBuilder content: () -> Content) {
         self.content = content()
@@ -104,13 +110,18 @@ private struct FloatingPanelContent<Content: View>: View {
 
     var body: some View {
         ZStack {
-            // Flat darkening wash — uniform top to bottom.
-            Color.black.opacity(0.20)
-                .allowsHitTesting(false)
+            // Keep the native material visible; use a solid semantic fill
+            // when Reduce Transparency is enabled.
+            if reduceTransparency {
+                Color(nsColor: .windowBackgroundColor).allowsHitTesting(false)
+            } else {
+                (colorScheme == .dark ? Color.black.opacity(0.20) : Color.white.opacity(0.12))
+                    .allowsHitTesting(false)
+            }
 
             // Subtle even stroke — no top-weighted gradient.
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.75)
+                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.75)
                 .allowsHitTesting(false)
 
             // No padding here — each shelf view applies its own margin so

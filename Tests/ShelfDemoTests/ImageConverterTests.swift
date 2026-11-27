@@ -91,12 +91,12 @@ final class ImageConverterTests: XCTestCase {
         }
         // Re-write src as a real PNG (the empty data above isn't decodable).
         let realPNG = try makeSyntheticPNG(named: "real")
-        try? FileManager.default.removeItem(at: src)
         // We can't write into the locked dir — but can put the source there
         // by relaxing permissions briefly:
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755], ofItemAtPath: lockedDir.path
         )
+        try FileManager.default.removeItem(at: src)
         try FileManager.default.copyItem(at: realPNG, to: src)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o555], ofItemAtPath: lockedDir.path

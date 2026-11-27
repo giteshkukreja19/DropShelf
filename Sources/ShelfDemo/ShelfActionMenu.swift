@@ -5,15 +5,34 @@ import UniformTypeIdentifiers
 struct ShelfActionMenu: View {
     @ObservedObject var manager: ShelfManager
     let shelfID: UUID
+    var selection: Set<UUID> = []
 
     var body: some View {
         CircularIconButton(systemName: "chevron.down", action: presentMenu)
     }
 
     private func presentMenu() {
-        let menu = ShelfActionMenuBuilder.make(manager: manager, shelfID: shelfID)
-        if let event = NSApp.currentEvent, let view = event.window?.contentView {
-            NSMenu.popUpContextMenu(menu, with: event, for: view)
+        let menu = ShelfActionMenuBuilder.make(manager: manager, shelfID: shelfID, selection: selection)
+        if let window = NSApp.currentEvent?.window ?? NSApp.keyWindow,
+           let screen = window.screen?.visibleFrame {
+            menu.update()
+            let size = menu.size
+            let frame = window.frame
+            let gap: CGFloat = 8
+            let x: CGFloat
+            let y: CGFloat
+            if frame.maxX + gap + size.width <= screen.maxX {
+                x = frame.maxX + gap; y = min(frame.maxY, screen.maxY - gap)
+            } else if frame.minX - gap - size.width >= screen.minX {
+                x = frame.minX - gap - size.width; y = min(frame.maxY, screen.maxY - gap)
+            } else if frame.minY - gap - size.height >= screen.minY {
+                x = max(screen.minX, min(frame.minX, screen.maxX - size.width)); y = frame.minY - gap
+            } else if frame.maxY + gap + size.height <= screen.maxY {
+                x = max(screen.minX, min(frame.minX, screen.maxX - size.width)); y = frame.maxY + gap + size.height
+            } else {
+                x = max(screen.minX, min(frame.minX, screen.maxX - size.width)); y = min(screen.maxY - gap, max(screen.minY + size.height, frame.maxY))
+            }
+            menu.popUp(positioning: nil, at: NSPoint(x: x, y: y), in: nil)
         } else {
             menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
         }
@@ -27,12 +46,18 @@ private final class ShelfActionTargets: NSObject {
     let manager: ShelfManager
     let shelfID: UUID
 
-    init(manager: ShelfManager, shelfID: UUID) {
+    let selection: Set<UUID>
+
+    init(manager: ShelfManager, shelfID: UUID, selection: Set<UUID> = []) {
+        self.selection = selection
         self.manager = manager
         self.shelfID = shelfID
     }
 
-    fileprivate var items: [ShelfItem] { manager.items(of: shelfID) }
+    fileprivate var items: [ShelfItem] {
+        let all = manager.items(of: shelfID)
+        return selection.isEmpty ? all : all.filter { selection.contains($0.id) }
+    }
     private var urls: [URL] {
         items.compactMap { $0.fileURL }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
@@ -58,7 +83,7 @@ private final class ShelfActionTargets: NSObject {
 
     @objc func quickLook() {
         guard !urls.isEmpty else { return }
-        QuickLookController.shared.show(startingAt: urls.count - 1)
+        QuickLookController.shared.show(startingAt: urls.count - 1, urls: urls)
     }
 
     @objc func airDrop() {
@@ -71,6 +96,14 @@ private final class ShelfActionTargets: NSObject {
         guard !urls.isEmpty,
               let service = NSSharingService(named: .composeMessage) else { return }
         service.perform(withItems: urls)
+    }
+
+    @objc func email() {
+        let values: [Any] = items.compactMap { item -> Any? in
+            if let url = item.fileURL { return url }
+            return item.textContent
+        }
+        _ = ShareCoordinator.shared.performInstant("Mail", values: values)
     }
 
     @objc func whatsApp() { ShareCoordinator.shared.whatsApp(items: items) }
@@ -118,6 +151,37 @@ private final class ShelfActionTargets: NSObject {
         }
         if !objects.isEmpty { pb.writeObjects(objects) }
     }
+
+    @objc func copyToFolder() { transfer(move: false) }
+    @objc func moveToFolder() { transfer(move: true) }
+    @objc func copyToFavourite(_ sender: NSMenuItem) { if let folder = sender.representedObject as? URL { transfer(to: folder, move: false) } }
+    @objc func moveToFavourite(_ sender: NSMenuItem) { if let folder = sender.representedObject as? URL { transfer(to: folder, move: true) } }
+    private func transfer(move: Bool) {
+        ShelfFolderPicker.choose(owner: NSApp.keyWindow, initial: nil) { folder in
+            if let folder { self.transfer(to: folder, move: move) }
+        }
+    }
+    private func transfer(to folder: URL, move: Bool) {
+        var failures: [String] = []
+        for item in items {
+            guard let source = item.fileURL else { continue }
+            let dest = folder.appendingPathComponent(source.lastPathComponent)
+            let srcPath = source.resolvingSymlinksInPath().standardizedFileURL.path
+            let dstPath = dest.resolvingSymlinksInPath().standardizedFileURL.path
+            guard srcPath != dstPath, !dstPath.hasPrefix(srcPath + "/"), !FileManager.default.fileExists(atPath: dest.path) else { failures.append(source.lastPathComponent + ": destination exists or is inside source"); continue }
+            do {
+                if move { try manager.renameItem(id: item.id, to: dest, in: shelfID) }
+                else { try FileManager.default.copyItem(at: source, to: dest) }
+            } catch { failures.append(source.lastPathComponent + ": " + error.localizedDescription) }
+        }
+        if !failures.isEmpty { ShelfDataLocation.alert("Some files were not transferred", failures.joined(separator: "\n")) }
+    }
+    @objc func sortShelf(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(value, forKey: "shelf.sortOrder")
+    }
+    @objc func dockShelf() { manager.dockRequested.send(shelfID) }
+    @objc func settings() { NSApp.sendAction(Selector(("openSettingsAction")), to: NSApp.delegate, from: nil) }
 
     @objc func clear() {
         manager.clear(shelfID: shelfID)
@@ -177,8 +241,13 @@ private final class ShelfActionTargets: NSObject {
         }
     }
 
+    @objc func renameSingle() {
+        guard items.count == 1, let item = items.first else { return }
+        ShelfItemActions(item: item, selectedItems: [item], shelfID: shelfID, manager: manager, conversionService: nil, ocrService: nil).rename()
+    }
+
     @objc func batchRename() {
-        let items = manager.items(of: shelfID)
+        let items = self.items
         let renamable = items.compactMap { item -> (UUID, URL)? in
             guard let url = item.fileURL,
                   FileManager.default.fileExists(atPath: url.path) else { return nil }
@@ -252,114 +321,7 @@ private final class ShelfActionTargets: NSObject {
         }
     }
 
-    @objc func createZipArchive() {
-        let urls = self.urls
-        guard !urls.isEmpty else { return }
-
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Archive.zip"
-        panel.allowedContentTypes = [.zip]
-        panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let dest = panel.url else { return }
-
-        try? FileManager.default.removeItem(at: dest)
-
-        // Stage the sources by hard-link (falls back to copy) into a temp dir,
-        // then run `zip -r` from that dir using basenames. This sidesteps
-        // `zip -j` path-junk warnings and avoids any TCC surprises from
-        // spawning zip with absolute paths into protected folders.
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("Shelf-zip-\(UUID().uuidString)")
-
-        do {
-            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-        } catch {
-            Self.showZipError(String(format: L("alert.zip.staging-failed"), error.localizedDescription))
-            return
-        }
-
-        var basenames: [String] = []
-        var seen: Set<String> = []
-        for src in urls {
-            let name = Self.uniqueName(for: src.lastPathComponent, in: &seen)
-            let link = staging.appendingPathComponent(name)
-            do {
-                try FileManager.default.linkItem(at: src, to: link)
-            } catch {
-                // Fall back to copy for cross-volume or permission cases.
-                do {
-                    try FileManager.default.copyItem(at: src, to: link)
-                } catch {
-                    Self.showZipError(String(format: L("alert.zip.stage-failed"), src.lastPathComponent, error.localizedDescription))
-                    try? FileManager.default.removeItem(at: staging)
-                    return
-                }
-            }
-            basenames.append(name)
-        }
-
-        Task.detached {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
-            process.currentDirectoryURL = staging
-            process.arguments = ["-r", dest.path] + basenames
-
-            let errPipe = Pipe()
-            process.standardError = errPipe
-            process.standardOutput = Pipe()
-
-            do {
-                try process.run()
-            } catch {
-                try? FileManager.default.removeItem(at: staging)
-                await Self.showZipError(String(format: L("alert.zip.launch-failed"), error.localizedDescription))
-                return
-            }
-            process.waitUntilExit()
-
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let errText = String(data: errData, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let status = process.terminationStatus
-            try? FileManager.default.removeItem(at: staging)
-
-            if status != 0 {
-                let detail = errText.isEmpty
-                    ? String(format: L("alert.zip.exit-status"), Int(status))
-                    : errText
-                await Self.showZipError(detail)
-            }
-        }
-    }
-
-    @MainActor
-    private static func showZipError(_ detail: String) {
-        let alert = NSAlert()
-        alert.messageText = L("Archive Failed")
-        alert.informativeText = detail
-        alert.alertStyle = .warning
-        alert.runModal()
-    }
-
-    private static func uniqueName(for name: String, in seen: inout Set<String>) -> String {
-        var candidate = name
-        if !seen.contains(candidate) {
-            seen.insert(candidate)
-            return candidate
-        }
-        let url = URL(fileURLWithPath: name)
-        let stem = url.deletingPathExtension().lastPathComponent
-        let ext = url.pathExtension
-        var i = 2
-        while true {
-            candidate = ext.isEmpty ? "\(stem) \(i)" : "\(stem) \(i).\(ext)"
-            if !seen.contains(candidate) {
-                seen.insert(candidate)
-                return candidate
-            }
-            i += 1
-        }
-    }
+    @objc func createZipArchive() { ShelfArchiveAction.run(urls: urls) }
 
     @objc func copyPath() {
         let urls = self.urls
@@ -371,7 +333,7 @@ private final class ShelfActionTargets: NSObject {
     }
 
     @objc func moveAllToTrash() {
-        let items = manager.items(of: shelfID)
+        let items = self.items
         var urlToItem: [String: ShelfItem] = [:]
         var urls: [URL] = []
         for item in items {
@@ -453,12 +415,12 @@ private final class ShelfActionNSMenu: NSMenu {
 
 @MainActor
 enum ShelfActionMenuBuilder {
-    static func make(manager: ShelfManager, shelfID: UUID) -> NSMenu {
+    static func make(manager: ShelfManager, shelfID: UUID, selection: Set<UUID> = []) -> NSMenu {
         let menu = ShelfActionNSMenu()
-        let targets = ShelfActionTargets(manager: manager, shelfID: shelfID)
+        let targets = ShelfActionTargets(manager: manager, shelfID: shelfID, selection: selection)
         menu.targets = targets
 
-        let items = manager.items(of: shelfID)
+        let items = targets.items
         let urls = items.compactMap { $0.fileURL }
         let hasFiles = !urls.isEmpty
 
@@ -488,31 +450,24 @@ enum ShelfActionMenuBuilder {
 
         menu.addItem(.separator())
 
-        menu.addItem(makeItem(
-            title: "Share All…",
-            symbol: "square.and.arrow.up",
-            action: #selector(ShelfActionTargets.shareAll),
-            target: targets,
-            enabled: !items.isEmpty
-        ))
-        menu.addItem(makeItem(title: "WhatsApp…", symbol: "message", action: #selector(ShelfActionTargets.whatsApp), target: targets, enabled: !items.isEmpty))
-        menu.addItem(CloudSharing.menu(target: targets, action: #selector(ShelfActionTargets.copyToCloud), enabled: hasFiles))
-
-        menu.addItem(makeItem(
-            title: L("AirDrop"),
-            symbol: "wave.3.right",
-            action: #selector(ShelfActionTargets.airDrop),
-            target: targets,
-            enabled: hasFiles
-        ))
-
-        menu.addItem(makeItem(
-            title: L("Messages"),
-            symbol: "message",
-            action: #selector(ShelfActionTargets.messages),
-            target: targets,
-            enabled: hasFiles
-        ))
+        // Keep the two common sharing destinations visible; group the rest.
+        menu.addItem(makeItem(title: L("AirDrop"), symbol: "wave.3.right",
+            action: #selector(ShelfActionTargets.airDrop), target: targets, enabled: hasFiles))
+        menu.addItem(makeItem(title: L("Messages"), symbol: "message",
+            action: #selector(ShelfActionTargets.messages), target: targets, enabled: hasFiles))
+        let more = NSMenuItem(title: "More Sharing", action: nil, keyEquivalent: "")
+        more.image = symbol("ellipsis")
+        let sharing = NSMenu()
+        sharing.autoenablesItems = false
+        sharing.addItem(makeItem(title: "Share…", symbol: "square.and.arrow.up",
+            action: #selector(ShelfActionTargets.shareAll), target: targets, enabled: !items.isEmpty))
+        sharing.addItem(makeItem(title: UserDefaults.standard.string(forKey: "shelf.emailProvider") == "System Mail" ? "Mail…" : "Gmail…", symbol: "envelope",
+            action: #selector(ShelfActionTargets.email), target: targets, enabled: !items.isEmpty))
+        sharing.addItem(makeItem(title: "WhatsApp…", symbol: "message",
+            action: #selector(ShelfActionTargets.whatsApp), target: targets, enabled: !items.isEmpty))
+        sharing.addItem(CloudSharing.menu(target: targets, action: #selector(ShelfActionTargets.copyToCloud), enabled: hasFiles))
+        more.submenu = sharing
+        menu.addItem(more)
 
         menu.addItem(.separator())
 
@@ -520,14 +475,6 @@ enum ShelfActionMenuBuilder {
             title: L("Add From Clipboard"),
             symbol: "doc.on.clipboard",
             action: #selector(ShelfActionTargets.addFromClipboard),
-            target: targets,
-            enabled: true
-        ))
-
-        menu.addItem(makeItem(
-            title: L("Capture Screen Text…"),
-            symbol: "camera.viewfinder",
-            action: #selector(ShelfActionTargets.captureScreenText),
             target: targets,
             enabled: true
         ))
@@ -545,20 +492,55 @@ enum ShelfActionMenuBuilder {
 
         menu.addItem(.separator())
 
+        menu.addItem(ShelfFavouriteMenu.make(title: "Copy to…", symbol: "folder", target: targets, selector: #selector(ShelfActionTargets.copyToFavourite(_:)), direct: #selector(ShelfActionTargets.copyToFolder), enabled: hasFiles))
+        menu.addItem(ShelfFavouriteMenu.make(title: "Move to…", symbol: "folder.badge.arrow.forward", target: targets, selector: #selector(ShelfActionTargets.moveToFavourite(_:)), direct: #selector(ShelfActionTargets.moveToFolder), enabled: hasFiles))
         let allActions = NSMenuItem(title: L("All Actions"), action: nil, keyEquivalent: "")
         allActions.image = symbol("ellipsis.circle")
         allActions.submenu = makeAllActionsMenu(targets: targets, hasFiles: hasFiles)
         menu.addItem(allActions)
+        if items.count == 1 {
+            menu.insertItem(makeItem(title: L("Rename…"), symbol: "character.cursor.ibeam", action: #selector(ShelfActionTargets.renameSingle), target: targets, enabled: hasFiles), at: menu.items.firstIndex(of: allActions) ?? 0)
+        }
+        ShelfActionPreferences.apply(to: menu, submenu: allActions)
 
-        let identity = NSMenuItem(title: L("Shelf"), action: nil, keyEquivalent: "")
-        identity.image = symbol("tag")
-        identity.submenu = makeIdentityMenu(manager: manager, shelfID: shelfID, targets: targets)
-        menu.addItem(identity)
+        let identity = NSMenuItem(title: "Customize", action: nil, keyEquivalent: "")
+        identity.image = symbol("slider.horizontal.3")
+        let customize = makeIdentityMenu(manager: manager, shelfID: shelfID, targets: targets)
+        customize.addItem(.separator())
+        customize.addItem(makeItem(
+            title: L("Capture Screen Text…"),
+            symbol: "camera.viewfinder",
+            action: #selector(ShelfActionTargets.captureScreenText),
+            target: targets,
+            enabled: true
+        ))
+
+        identity.submenu = customize
+
+        let sort = NSMenuItem(title: "Sort By", action: nil, keyEquivalent: "")
+        let sortMenu = NSMenu()
+        for value in ["Date Added", "Name", "Size"] {
+            let row = makeItem(title: value, symbol: "arrow.up.arrow.down", action: #selector(ShelfActionTargets.sortShelf(_:)), target: targets, enabled: true)
+            row.representedObject = value
+            row.state = (UserDefaults.standard.string(forKey: "shelf.sortOrder") ?? "Date Added") == value ? .on : .off
+            sortMenu.addItem(row)
+        }
+        menu.addItem(.separator())
+        sort.image = symbol("arrow.up.arrow.down")
+        sort.submenu = sortMenu
+        let shelfOptions = NSMenu()
+        shelfOptions.addItem(sort)
+        shelfOptions.addItem(makeItem(title: "Dock to Edge", symbol: "rectangle.righthalf.inset.filled", action: #selector(ShelfActionTargets.dockShelf), target: targets, enabled: true))
+        shelfOptions.addItem(identity)
+        let shelfEntry = NSMenuItem(title: "Shelf", action: nil, keyEquivalent: "")
+        shelfEntry.image = symbol("slider.horizontal.3")
+        shelfEntry.submenu = shelfOptions
+        menu.addItem(shelfEntry)
+        menu.addItem(makeItem(title: "Settings…", symbol: "gearshape", action: #selector(ShelfActionTargets.settings), target: targets, enabled: true))
 
         // Undo (Cmd-Z) — title reflects what's about to be reversed so the
         // user knows whether they're undoing a Clear or a Move-to-Trash. The
-        // row stays in the menu when there's nothing to undo (disabled), so
-        // discoverability isn't tied to recent activity.
+        // row is visible only when an undo is available.
         let undoTitle = manager.undoSnapshot?.menuTitle ?? L("Undo")
         let undo = NSMenuItem(
             title: undoTitle,
@@ -569,7 +551,8 @@ enum ShelfActionMenuBuilder {
         undo.target = targets
         undo.image = symbol("arrow.uturn.backward")
         undo.isEnabled = manager.canUndo
-        menu.addItem(undo)
+        if manager.canUndo { menu.addItem(undo) }
+        menu.addItem(.separator())
 
         menu.addItem(makeItem(
             title: L("Clear Shelf"),
@@ -790,9 +773,27 @@ enum ShelfActionMenuBuilder {
     ) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = target
-        item.image = symbol(name)
+        item.image = menuIcon(for: action, fallback: name)
         item.isEnabled = enabled
         return item
+    }
+
+    private static func menuIcon(for action: Selector, fallback: String) -> NSImage? {
+        let identifier: String?
+        switch action {
+        case #selector(ShelfActionTargets.showInFinder): identifier = "com.apple.finder"
+        case #selector(ShelfActionTargets.messages): identifier = "com.apple.MobileSMS"
+        case #selector(ShelfActionTargets.whatsApp): identifier = "net.whatsapp.WhatsApp"
+        default: identifier = nil
+        }
+        if let identifier, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier) {
+            return appIcon(url)
+        }
+        if action == #selector(ShelfActionTargets.airDrop), let image = NSSharingService(named: .sendViaAirDrop)?.image.copy() as? NSImage {
+            image.size = NSSize(width: 16, height: 16)
+            return image
+        }
+        return symbol(fallback)
     }
 
     private static func symbol(_ name: String) -> NSImage? {

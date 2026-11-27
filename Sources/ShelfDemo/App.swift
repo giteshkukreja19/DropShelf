@@ -6,7 +6,7 @@ import SwiftUI
 
 @main
 struct ShelfDemoApp {
-    static func main() {
+    @MainActor static func main() {
         // Must run before any localized lookup — NSBundle reads
         // AppleLanguages once at first resolution.
         LanguagePreference.applyAtLaunch()
@@ -14,6 +14,7 @@ struct ShelfDemoApp {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
+        guard ShelfDataLocation.prepare() else { return }
         let delegate = AppDelegate()
         app.delegate = delegate
 
@@ -25,6 +26,8 @@ struct ShelfDemoApp {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let manager = ShelfManager()
+    private let folderMonitor = ShelfFolderMonitor()
+    private var monitoredShelves: [UUID: UUID] = [:]
     private let shakeDetector = ShakeDetector()
 
     // One panel per shelf.
@@ -38,9 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Shelves created via shake auto-close when emptied; menu-created shelves don't.
     private var ephemeralShelfIDs: Set<UUID> = []
-    private var emptyCloseTimers: [UUID: Timer] = [:]
     private var shelvesCancellable: AnyCancellable?
-    private let emptyCloseGrace: TimeInterval = 1.2
 
     // Conversion service — owns all in-progress format conversions.
     private let conversionService = ConversionService()
@@ -87,15 +88,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var keepAwakeTimer: Timer?
     private var dropTargetActive: Bool = false
 
-    // Auto-park (top-right stack) state — populated only when the
-    // "shelf.autoParkTopRight" preference is on. We track per-shelf item
-    // counts so we only park on the 0→non-empty transition (the first drop
-    // after creation), not on every subsequent change.
+    // Auto-park only on the first empty-to-populated transition.
     private var lastItemCounts: [UUID: Int] = [:]
     private var parkedShelfIDs: Set<UUID> = []
-    private var parkedShelfOrder: [UUID] = []
-    private let parkMargin: CGFloat = 12
-    private let parkSpacing: CGFloat = 12
+    private var parkJobs: [UUID: Task<Void, Never>] = [:]
+    private var parkTokens: [UUID: UUID] = [:]
 
     // Outside-click watcher: a single global mouse-down monitor that's
     // always installed; the "shelf.closeOnOutsideClick" flag is checked
@@ -104,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var outsideClickMonitor: Any?
     private var shortcutGlobalMonitor: Any?
     private var shortcutLocalMonitor: Any?
+    private var pasteMonitor: Any?
     private var screenCaptureActive = false
 
     private func applyStatusIcon(dropping: Bool? = nil, awake: Bool? = nil) {
@@ -112,6 +110,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let button = statusItem?.button else { return }
         let isDropping = dropTargetActive
         let isAwake = isKeepAwake
+        let style = UserDefaults.standard.string(forKey: "shelf.menuBarIconStyle") ?? "Traditional"
+        if !isDropping && !isAwake && style != "Traditional",
+           let image = NSImage(systemSymbolName: style == "Stack" ? "square.stack" : "square.fill", accessibilityDescription: "DropShelf") {
+            image.isTemplate = true
+            button.image = image
+            return
+        }
         // Custom-drawn glyph: rounded-square outline with the dot fully
         // inside the frame at the top-right (the SF `app.badge` symbol
         // parks the dot at the corner so it pokes out of the outline).
@@ -155,38 +160,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.image = image
     }
 
+    func applyGeneralAppearance() {
+        let defaults = UserDefaults.standard
+        let dock = defaults.bool(forKey: "shelf.showInDock")
+        let menu = defaults.object(forKey: "shelf.showInMenuBar") as? Bool ?? true
+        if !dock { statusItem?.isVisible = true }
+        NSApp.setActivationPolicy(dock ? .regular : .accessory)
+        statusItem?.isVisible = menu || !dock
+        applyStatusIcon()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettingsAction()
+        return true
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        let item = NSMenuItem(title: "Settings…", action: #selector(openSettingsAction), keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        return menu
+    }
+
     private var collapsedSize: NSSize {
         let stored = UserDefaults.standard.object(forKey: "shelf.compactSizePercent") as? Int ?? 100
         let scale = CGFloat(min(150, max(90, stored))) / 100
         return NSSize(width: 210 * scale, height: 210 * scale)
     }
-    private let expandedSize = NSSize(width: 520, height: 560)
-    private let expandedMinHeight: CGFloat = 280
     private let dockedSize = NSSize(width: 44, height: 150)
-    private let dockedOffscreen: CGFloat = 18  // hides the right-side curve past the screen edge
+    private let dockedOffscreen: CGFloat = 18
 
-    /// Compute an expanded panel size that hugs the actual content. Cap at
-    /// `expandedSize.height` so we never grow taller than the original max.
-    /// The ScrollView inside takes care of any overflow above the cap.
+    /// Capture the frontmost visible expanded shelf before changing the lock.
+    /// Never capture a docked window or the temporary tool panel dimensions.
+    func currentExpandedShelfDimensions() -> String? {
+        for window in NSApp.orderedWindows {
+            guard let entry = panels.first(where: { $0.value === window }),
+                  window.isVisible, expandedShelfIDs.contains(entry.key),
+                  !dockedShelfIDs.contains(entry.key),
+                  !ShelfToolRouter.activeShelves.contains(entry.key) else { continue }
+            let size = window.frame.size
+            let encoded = ShelfExpandedGeometry.encode(size)
+            if ShelfExpandedGeometry.decode(encoded) != nil { return encoded }
+        }
+        return nil
+    }
+
     private func expandedSize(for shelfID: UUID) -> NSSize {
+        let defaults = UserDefaults.standard
+        let percent = defaults.object(forKey: "shelf.expandedSizePercent") as? Int ?? 100
+        let fixed = defaults.bool(forKey: "shelf.fixedExpandedSize")
+        let screen = panels[shelfID]?.screen ?? NSScreen.main
+        let visible = screen?.visibleFrame.size ?? NSSize(width: 1280, height: 800)
+        let preferred = ShelfExpandedGeometry.preferred(percent: percent, fixed: fixed,
+            custom: defaults.string(forKey: ShelfExpandedGeometry.dimensionsKey) ?? "", visible: visible)
+        if fixed { return preferred }
         let count = manager.items(of: shelfID).count
-        // Constants mirror DocumentGridItem layout + ExpandedShelfView chrome.
-        let cellHeight: CGFloat = 154   // 8 + 100 + 8 + ~22 + 8 + 8 padding
-        let rowSpacing: CGFloat = 18
-        // Chrome = panel padding (20) + outer VStack header (~32) + spacing
-        // (14×2) + reveal pill (~32) + grid vertical inset (~8) + safety (4).
-        let chrome: CGFloat = 130
-
-        // Adaptive grid: minimum column 96, spacing 16. Available width is
-        // expanded panel width minus FloatingPanel padding (20).
-        let available = expandedSize.width - 20
-        let columns = max(1, Int((available + 16) / (96 + 16)))
-        let rows = max(1, (count + columns - 1) / columns)
-
-        let contentH = CGFloat(rows) * cellHeight
-            + CGFloat(max(rows - 1, 0)) * rowSpacing
-        let h = min(chrome + contentH, expandedSize.height)
-        return NSSize(width: expandedSize.width, height: max(h, expandedMinHeight))
+        let isList = defaults.string(forKey: "shelf.viewMode") == "list"
+        let width = ShelfExpandedGeometry.adaptiveWidth(maximum: preferred.width, count: count, isList: isList)
+        let height = ShelfExpandedGeometry.adaptiveHeight(width: width, count: count, isList: isList, maximum: preferred.height)
+        return NSSize(width: width, height: height)
     }
 
     // Docked-to-edge state.
@@ -199,6 +232,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        folderMonitor.start { [weak self] rule, urls in
+            guard let self else { return }
+            let existing = self.monitoredShelves[rule.id]
+            let id: UUID
+            if !rule.newShelf, let existing, self.manager.shelf(id: existing) != nil { id = existing }
+            else { id = self.manager.createShelf(); self.monitoredShelves[rule.id] = id; self.manager.renameShelf(id: id, to: URL(fileURLWithPath: rule.path).lastPathComponent) }
+            for url in urls where !self.manager.containsFile(url: url, in: id) { _ = self.manager.addFile(url: url, to: id) }
+            if !self.manager.items(of: id).isEmpty, self.panels[id]?.isVisible != true { self.openPanel(for: id, nearCursor: false) }
+        }
+        let defaults = UserDefaults.standard
+        if !defaults.bool(forKey: "shelf.compactLayoutMigration2") {
+            if defaults.string(forKey: ShelfExpandedGeometry.dimensionsKey) == "520,340" {
+                defaults.removeObject(forKey: ShelfExpandedGeometry.dimensionsKey)
+            }
+            defaults.set(true, forKey: "shelf.compactLayoutMigration2")
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         applyStatusIcon(dropping: false)
         // Flip the glyph while any panel is being targeted by a drop so the
@@ -211,6 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        applyGeneralAppearance()
 
         shakeDetector.shouldSuppress = { [weak self] in self?.manager.isDragging == true }
         shakeDetector.shouldSuppressAutomatic = { [weak self] in
@@ -271,7 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         runShelfExpiryPrune()
         expiryTimer = Timer.scheduledTimer(
-            withTimeInterval: 3600, repeats: true
+            withTimeInterval: 60, repeats: true
         ) { [weak self] _ in
             Task { @MainActor in self?.runShelfExpiryPrune() }
         }
@@ -286,27 +336,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             name: NSApplication.didBecomeActiveNotification,
             object: nil
         )
-        manager.pruneMissingFiles()
+        manager.scheduleMissingFileSweep()
         missingFileSweepTimer = Timer.scheduledTimer(
             withTimeInterval: 2.0, repeats: true
         ) { [weak self] _ in
-            Task { @MainActor in self?.manager.pruneMissingFiles() }
+            Task { @MainActor in self?.manager.scheduleMissingFileSweep() }
         }
     }
 
     @objc private func handleAppOrFocusChange() {
-        manager.pruneMissingFiles()
+        manager.scheduleMissingFileSweep()
     }
 
     private func runShelfExpiryPrune() {
         let days = UserDefaults.standard.integer(forKey: "shelf.expiryDays")
-        guard days > 0 else { return }
+        guard days != 0, !manager.isDragging, !screenCaptureActive else { return }
         let removed = manager.pruneShelves(olderThanDays: days)
         for shelfID in removed {
             panels[shelfID]?.orderOut(nil)
             panels.removeValue(forKey: shelfID)
             ephemeralShelfIDs.remove(shelfID)
-            emptyCloseTimers.removeValue(forKey: shelfID)?.invalidate()
         }
         if manager.shelves.isEmpty {
             _ = manager.createShelf()
@@ -317,6 +366,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let (shelfID, _) = panels.first(where: { $0.value.isKeyWindow })
                 ?? panels.first(where: { $0.value.isVisible })
         else { return [] }
+        guard !ShelfToolRouter.activeShelves.contains(shelfID) else { return [] }
         return manager.items(of: shelfID).compactMap { $0.fileURL }
     }
 
@@ -325,6 +375,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     nonisolated func menuNeedsUpdate(_ menu: NSMenu) {
         MainActor.assumeIsolated {
             self.rebuildStatusMenu(menu)
+        }
+    }
+
+    @objc private func toggleScreenRecording() {
+        if #available(macOS 15.0, *) {
+            Task { @MainActor in
+                let recorder = ShelfScreenRecorder.shared
+                if recorder.recording { await recorder.stop() } else if !recorder.busy { recorder.openLauncher() }
+            }
         }
     }
 
@@ -352,7 +411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             keyEquivalent: "n"
         )
         newShelf.target = self
-        newShelf.keyEquivalentModifierMask = [.option, .shift]
+        ShelfShortcut.new.configure(newShelf)
         menu.addItem(newShelf)
 
         let newFromClip = NSMenuItem(
@@ -361,12 +420,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             keyEquivalent: "a"
         )
         newFromClip.target = self
-        newFromClip.keyEquivalentModifierMask = [.option, .shift]
+        ShelfShortcut.clipboard.configure(newFromClip)
         menu.addItem(newFromClip)
-
-        let newWebLink = NSMenuItem(title: "New Shelf From Copied Web Link", action: #selector(newShelfFromWebLinkAction), keyEquivalent: "")
-        newWebLink.target = self
-        menu.addItem(newWebLink)
 
         let captureScreen = NSMenuItem(
             title: L("Capture Screen Text…"),
@@ -374,8 +429,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             keyEquivalent: "c"
         )
         captureScreen.target = self
-        captureScreen.keyEquivalentModifierMask = [.option, .shift]
+        ShelfShortcut.capture.configure(captureScreen)
         menu.addItem(captureScreen)
+        if #available(macOS 15.0, *) {
+            let recorder = ShelfScreenRecorder.shared
+            if UserDefaults.standard.bool(forKey: "recorder.enabled") || recorder.busy {
+                let item = NSMenuItem(title: recorder.busy ? "Stop Screen Recording" : "Record Screen…", action: #selector(toggleScreenRecording), keyEquivalent: "")
+                (recorder.busy ? ShelfShortcut.stopRecording : ShelfShortcut.recordingControls).configure(item)
+                item.target = self
+                item.isEnabled = !recorder.busy || recorder.recording
+                menu.addItem(item)
+            }
+        }
 
         let recent = NSMenuItem(title: L("Recent Shelves"), action: nil, keyEquivalent: "")
         recent.submenu = buildRecentShelvesMenu()
@@ -492,16 +557,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openSettingsAction() {
         if settingsWindow == nil {
             let hosting = NSHostingController(rootView: SettingsView())
-            let window = NSWindow(contentViewController: hosting)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 660), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
             // Set once at creation; the title doesn't refresh on language
             // change. Pre-existing accepted limitation from v1.4.
-            window.title = L("Shelf Settings")
-            window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
-            window.contentMinSize = NSSize(width: 540, height: 410)
-            window.setContentSize(NSSize(width: 620, height: 470))
+            window.title = "DropShelf Settings"
+            window.styleMask = [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView]
+            window.isMovable = true
+            window.isMovableByWindowBackground = true
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
+            window.toolbar = nil
+            window.appearance = nil
+            window.backgroundColor = .clear
+            window.isOpaque = false
+            // The hosting view fills a native material container, including
+            // the titlebar. A transparent titlebar alone leaves the backing
+            // window surface visible above SwiftUI's safe area.
+            let container = NSVisualEffectView(frame: hosting.view.frame)
+            container.material = .sidebar
+            container.blendingMode = .behindWindow
+            container.state = .followsWindowActiveState
+            let controller = NSViewController()
+            controller.view = container
+            controller.addChild(hosting)
+            hosting.view.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(hosting.view)
+            NSLayoutConstraint.activate([
+                hosting.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                hosting.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                hosting.view.topAnchor.constraint(equalTo: container.topAnchor),
+                hosting.view.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            ])
+            window.contentViewController = controller
+            window.contentMinSize = NSSize(width: 680, height: 520)
+            window.setContentSize(NSSize(width: 700, height: 660))
             window.isReleasedWhenClosed = false
             window.center()
-            window.setFrameAutosaveName("DropShelfSettingsWindow")
+            window.setFrameAutosaveName("DropShelfSettingsWindowCompactV4")
             settingsWindow = window
         }
         // Accessory app: temporarily bring to front so the window receives focus.
@@ -536,7 +629,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.representedObject = shelf.id
 
             let title: String
-            if let n = shelf.name, !n.isEmpty {
+            let displayName = shelf.displayShelfName(intelligent: UserDefaults.standard.bool(forKey: "shelf.intelligentNames"))
+            if let n = displayName {
                 title = n
             } else if shelf.items.count == 1 {
                 title = shelf.items[0].displayName
@@ -544,7 +638,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 title = String(format: L("%lld Files"), shelf.items.count)
             }
             var subtitle = formatter.string(from: shelf.createdAt)
-            if shelf.name?.isEmpty == false {
+            if displayName != nil {
                 let count = shelf.items.count == 1
                     ? L("1 file")
                     : String(format: L("%lld files"), shelf.items.count)
@@ -643,22 +737,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         openPanel(for: shelfID, nearCursor: false)
     }
 
-    @objc private func newShelfFromWebLinkAction() {
-        let links = WebDragLinks.read(NSPasteboard.general)
-        guard !links.isEmpty else {
-            let alert = NSAlert()
-            alert.messageText = "No web link copied"
-            alert.informativeText = "Copy the website address from your browser, then try again."
-            alert.addButton(withTitle: "OK")
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
-            return
-        }
-        let shelfID = manager.createShelf()
-        for link in links { manager.addText(link.absoluteString, to: shelfID) }
-        openPanel(for: shelfID, nearCursor: false)
-    }
-
     @objc private func captureScreenTextAction() {
         guard !screenCaptureActive else { return }
         screenCaptureActive = true
@@ -670,6 +748,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 manager.addText(text, to: shelfID)
                 openPanel(for: shelfID, nearCursor: false)
                 if let panel = panels[shelfID] {
+                    if dockedShelfIDs.contains(shelfID) {
+                        setPanelDocked(shelfID, docked: false)
+                        manager.undockRequested.send(shelfID)
+                    }
+                    manager.revealRequested.send(shelfID)
+                    panel.orderFrontRegardless()
                     showToast(L("Text copied to clipboard"), near: panel)
                 }
             } catch let error as OCRError {
@@ -703,12 +787,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Pinned shelves are deliberately preserved — the pin is the user's
         // signal to keep that shelf around regardless of cleanup actions, and
         // matches the auto-expiry behavior (which also skips pinned shelves).
-        for shelf in manager.shelves where !shelf.pinned {
+        for shelf in manager.shelves where !shelf.pinned && !ShelfToolRouter.activeShelves.contains(shelf.id) {
             panels[shelf.id]?.orderOut(nil)
             panels.removeValue(forKey: shelf.id)
             manager.removeShelf(id: shelf.id)
             ephemeralShelfIDs.remove(shelf.id)
-            emptyCloseTimers.removeValue(forKey: shelf.id)?.invalidate()
         }
         if manager.shelves.isEmpty {
             _ = manager.createShelf()
@@ -751,7 +834,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.manager.removeShelf(id: shelfID)
                     self.panels.removeValue(forKey: shelfID)
                     self.ephemeralShelfIDs.remove(shelfID)
-                    self.emptyCloseTimers.removeValue(forKey: shelfID)?.invalidate()
                 }
                 self.pendingShelfID = nil
             }
@@ -779,33 +861,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ephemeralShelfIDs.formIntersection(existingIDs)
         dockedShelfIDs.formIntersection(existingIDs)
         preDockFrames = preDockFrames.filter { existingIDs.contains($0.key) }
-        // Auto-close on empty was disabled — the panel stays open until the
-        // user dismisses it explicitly via the X button. Tear down any
-        // lingering timers regardless of shelf liveness.
-        for (_, timer) in emptyCloseTimers { timer.invalidate() }
-        emptyCloseTimers.removeAll()
-    }
-
-    private func scheduleEmptyClose(for shelfID: UUID) {
-        guard emptyCloseTimers[shelfID] == nil else { return }
-        guard let panel = panels[shelfID], panel.isVisible else { return }
-
-        let timer = Timer.scheduledTimer(withTimeInterval: emptyCloseGrace, repeats: false) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.fireEmptyClose(for: shelfID)
-            }
-        }
-        emptyCloseTimers[shelfID] = timer
-    }
-
-    private func fireEmptyClose(for shelfID: UUID) {
-        emptyCloseTimers.removeValue(forKey: shelfID)?.invalidate()
-        guard ephemeralShelfIDs.contains(shelfID) else { return }
-        guard manager.items(of: shelfID).isEmpty else { return }
-        panels[shelfID]?.orderOut(nil)
-        panels.removeValue(forKey: shelfID)
-        ephemeralShelfIDs.remove(shelfID)
-        manager.removeShelf(id: shelfID)
+        // A populated shelf stays open until explicitly dismissed.
+        expandedShelfIDs.formIntersection(existingIDs)
+        dockedFrames = dockedFrames.filter { existingIDs.contains($0.key) }
+        ShelfToolRouter.activeShelves.formIntersection(existingIDs)
     }
 
     private func disarmShakeReleaseWatcher() {
@@ -820,7 +879,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func openPanel(for shelfID: UUID, nearCursor: Bool) {
         // Drop any items whose files have disappeared since we last looked,
         // so a freshly-opened panel never shows ghost entries.
-        manager.pruneMissingFiles()
+        manager.scheduleMissingFileSweep()
 
         let panel: FloatingPanel<ShelfContainerView>
         if let existing = panels[shelfID] {
@@ -833,7 +892,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let expanded = expandedShelfIDs.contains(shelfID)
         let size = expanded ? expandedSize(for: shelfID) : collapsedSize
 
+        if ShelfToolRouter.activeShelves.contains(shelfID) {
+            panel.makeKeyAndOrderFront(nil)
+            return
+        }
         if nearCursor {
+            cancelPark(shelfID)
             positionPanelNearCursor(panel, size: size)
         } else if panel.frame.size == .zero || !panel.isVisible {
             positionPanelBelowStatusItem(panel, size: size)
@@ -859,6 +923,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func hidePanel(for shelfID: UUID) {
+        cancelPark(shelfID)
         panels[shelfID]?.orderOut(nil)
         // Empty shelves are invisible in Recent Shelves, so dismissing them
         // would otherwise leave a zombie behind. Tear them down completely
@@ -866,7 +931,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if manager.items(of: shelfID).isEmpty {
             panels.removeValue(forKey: shelfID)
             ephemeralShelfIDs.remove(shelfID)
-            emptyCloseTimers.removeValue(forKey: shelfID)?.invalidate()
             manager.removeShelf(id: shelfID)
         }
     }
@@ -884,16 +948,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 onClose: { self?.hidePanel(for: shelfID) },
                 onIdleHideDocked: { self?.hideIdleDockedPanel(for: shelfID) },
                 onResize: { expanded in self?.setPanelExpanded(shelfID, expanded: expanded) },
-                onDockChanged: { docked in self?.setPanelDocked(shelfID, docked: docked) }
+                onDockChanged: { docked in self?.setPanelDocked(shelfID, docked: docked) },
+                sizeForShelf: { expanded in
+                    guard let self else { return .zero }
+                    return expanded ? self.expandedSize(for: shelfID) : self.collapsedSize
+                }
             )
         }
     }
 
     private func setPanelExpanded(_ shelfID: UUID, expanded: Bool) {
-        guard let panel = panels[shelfID] else { return }
         if expanded { expandedShelfIDs.insert(shelfID) } else { expandedShelfIDs.remove(shelfID) }
+        guard !ShelfToolRouter.activeShelves.contains(shelfID), !dockedShelfIDs.contains(shelfID), let panel = panels[shelfID] else { return }
 
+        guard !panel.inLiveResize else { return }
         let newSize = expanded ? expandedSize(for: shelfID) : collapsedSize
+        guard abs(panel.frame.width - newSize.width) > 1 || abs(panel.frame.height - newSize.height) > 1 else { return }
+        let shouldRepark = parkJobs[shelfID] != nil
+        if shouldRepark { cancelPark(shelfID) }
 
         let currentFrame = panel.frame
         let topY = currentFrame.maxY
@@ -905,18 +977,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let screenFrame = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
             originX = max(screenFrame.minX + 8,
                           min(originX, screenFrame.maxX - newSize.width - 8))
-            originY = max(screenFrame.minY + 8, originY)
+            originY = max(screenFrame.minY + 8, min(originY, screenFrame.maxY - newSize.height - 8))
         }
 
         let newFrame = NSRect(x: originX, y: originY,
                               width: newSize.width, height: newSize.height)
 
-        animate(panel: panel, to: newFrame)
+        if abs(panel.frame.width - newFrame.width) > 1 || abs(panel.frame.height - newFrame.height) > 1 {
+            animate(panel: panel, to: newFrame)
+        }
+        if shouldRepark { schedulePark(shelfID, delay: 520_000_000) }
     }
 
     private func setPanelDocked(_ shelfID: UUID, docked: Bool) {
-        guard let panel = panels[shelfID] else { return }
+        guard !ShelfToolRouter.activeShelves.contains(shelfID), let panel = panels[shelfID] else { return }
 
+        cancelPark(shelfID)
         if docked {
             let frame = panel.frame
             let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? frame
@@ -946,11 +1022,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             dockedShelfIDs.remove(shelfID)
             dockedFrames.removeValue(forKey: shelfID)
             if dockedShelfIDs.isEmpty { removeWindowMoveObserver() }
-            let restore: NSRect
+            let size = expandedShelfIDs.contains(shelfID) ? expandedSize(for: shelfID) : collapsedSize
+            var restore: NSRect
             if let saved = preDockFrames.removeValue(forKey: shelfID) {
-                restore = saved
+                restore = NSRect(x: saved.midX - size.width / 2, y: saved.maxY - size.height,
+                                 width: size.width, height: size.height)
             } else {
-                let size = expandedShelfIDs.contains(shelfID) ? expandedSize(for: shelfID) : collapsedSize
                 let currentFrame = panel.frame
                 let screenFrame = panel.screen?.visibleFrame
                     ?? NSScreen.main?.visibleFrame
@@ -961,93 +1038,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                   currentFrame.midY - size.height / 2)
                 restore = NSRect(origin: NSPoint(x: originX, y: originY), size: size)
             }
+            if let visible = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
+                restore = ShelfExpandedGeometry.clampedFrame(restore, in: visible)
+            }
             animate(panel: panel, to: restore)
         }
     }
 
-    // MARK: - Auto-park (top-right)
+    // MARK: - Auto-park
 
-    /// Detects 0→non-empty transitions per shelf and, if the setting is on,
-    /// slides the shelf's panel up to the top-right corner where it stacks
-    /// behind any other parked shelves. Also prunes tracking for shelves
-    /// that have been removed.
     private func checkAutoPark(_ shelves: [Shelf]) {
         let live = Set(shelves.map(\.id))
-        // Drop tracking for shelves that no longer exist so the stacking
-        // index stays compact when shelves are dismissed.
-        if parkedShelfOrder.contains(where: { !live.contains($0) }) {
-            parkedShelfOrder.removeAll { !live.contains($0) }
-            parkedShelfIDs.formIntersection(live)
-            // Reposition remaining parked shelves into the now-tighter stack.
-            relayoutParkedShelves()
-        }
+        for id in Array(parkJobs.keys) where !live.contains(id) { cancelPark(id) }
+        parkedShelfIDs.formIntersection(live)
         lastItemCounts = lastItemCounts.filter { live.contains($0.key) }
-
         let enabled = UserDefaults.standard.bool(forKey: "shelf.autoParkTopRight")
         for shelf in shelves {
-            let prev = lastItemCounts[shelf.id] ?? 0
+            let previous = lastItemCounts[shelf.id]
+            let prev = previous ?? 0
             let now = shelf.items.count
             lastItemCounts[shelf.id] = now
-            // Park on the very first drop into a freshly-empty shelf.
-            // Subsequent drops are ignored so the user can drag the panel
-            // anywhere they like without it snapping back.
-            if enabled, prev == 0, now > 0, !parkedShelfIDs.contains(shelf.id) {
-                parkShelf(id: shelf.id)
+            if now == 0 { cancelPark(shelf.id) }
+            if enabled, previous != nil, prev == 0, now > 0, !parkedShelfIDs.contains(shelf.id) {
+                parkedShelfIDs.insert(shelf.id)
+                schedulePark(shelf.id)
             }
         }
     }
 
-    private func parkShelf(id: UUID) {
-        guard panels[id] != nil else { return }
-        parkedShelfIDs.insert(id)
-        // Newest-parked shelf goes on top; existing shelves slide down a slot
-        // so the just-dropped panel always lands at the top-right corner.
-        parkedShelfOrder.insert(id, at: 0)
-        // Tiny pause so the just-dropped item visibly lands before the
-        // panel starts gliding away — but short enough that it doesn't look
-        // like the panel got stuck at the drop location.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-            self?.relayoutParkedShelves()
+    private func cancelPark(_ id: UUID) {
+        parkJobs.removeValue(forKey: id)?.cancel()
+        parkTokens.removeValue(forKey: id)
+    }
+
+    private func schedulePark(_ id: UUID, delay: UInt64 = 180_000_000) {
+        cancelPark(id)
+        let token = UUID()
+        parkTokens[id] = token
+        parkJobs[id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.parkTokens[id] == token {
+                    self.parkJobs.removeValue(forKey: id)
+                    self.parkTokens.removeValue(forKey: id)
+                }
+            }
+            do {
+                try await Task.sleep(nanoseconds: delay)
+                // Let the drag finish before moving its destination.
+                for _ in 0..<40 {
+                    if !self.manager.isDragging && !DragInitiatorView.hasActiveDrag && NSEvent.pressedMouseButtons == 0 { break }
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
+                guard !Task.isCancelled, !self.manager.isDragging,
+                      !DragInitiatorView.hasActiveDrag, NSEvent.pressedMouseButtons == 0,
+                      UserDefaults.standard.bool(forKey: "shelf.autoParkTopRight"),
+                      let panel = self.panels[id], panel.isVisible, !panel.inLiveResize,
+                      !self.dockedShelfIDs.contains(id), !ShelfToolRouter.activeShelves.contains(id),
+                      !self.manager.items(of: id).isEmpty else { return }
+                let screen = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
+                let position = ShelfScreenPosition(rawValue: UserDefaults.standard.string(forKey: "shelf.autoParkPosition") ?? "") ?? .topRight
+                let occupied = self.panels.compactMap { entry -> NSRect? in
+                    guard entry.key != id, entry.value.isVisible, entry.value.frame.intersects(screen) else { return nil }
+                    return entry.value.frame
+                }
+                let start = panel.frame.origin
+                let target = position.origin(for: panel.frame.size, in: screen, avoiding: occupied)
+                let distance = hypot(target.x - start.x, target.y - start.y)
+                guard distance > 1 else { return }
+                if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                    panel.setFrameOrigin(target)
+                    return
+                }
+                // Animate only the origin, never rebuild the shelf or resize its
+                // content on every frame. Time-based interpolation avoids jumps
+                // when a frame is delayed. User input can interrupt the glide.
+                let duration = min(0.85, max(0.35, Double(distance) / 1450 + 0.20))
+                let began = ProcessInfo.processInfo.systemUptime
+                while true {
+                    try Task.checkCancellation()
+                    guard panel.isVisible, self.panels[id] === panel, !panel.inLiveResize,
+                          !self.dockedShelfIDs.contains(id), !ShelfToolRouter.activeShelves.contains(id),
+                          !self.manager.isDragging, !DragInitiatorView.hasActiveDrag,
+                          NSEvent.pressedMouseButtons == 0,
+                          UserDefaults.standard.bool(forKey: "shelf.autoParkTopRight"),
+                          !self.manager.items(of: id).isEmpty else { return }
+                    let elapsed = ProcessInfo.processInfo.systemUptime - began
+                    let t = ShelfScreenPosition.progress(elapsed / duration)
+                    panel.setFrameOrigin(NSPoint(x: start.x + (target.x - start.x) * t,
+                                                 y: start.y + (target.y - start.y) * t))
+                    if elapsed >= duration { break }
+                    try await Task.sleep(nanoseconds: 16_666_667)
+                }
+            } catch { /* Cancelled by a new resize, user action or shutdown. */ }
         }
-    }
-
-    /// Park animation uses a longer duration and a softer ease-in/out curve
-    /// than the regular panel resize so the shelf glides up to the top-right
-    /// corner instead of snapping there. Keeps `animate(panel:to:)` snappy
-    /// for everything else (expand, dock, drag-restore).
-    private func animateParked(panel: NSPanel, to frame: NSRect) {
-        suppressMoveCheck = true
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.95
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0.0, 0.18, 1.0)
-            ctx.allowsImplicitAnimation = true
-            panel.animator().setFrame(frame, display: true)
-        }, completionHandler: { [weak self] in
-            self?.suppressMoveCheck = false
-        })
-    }
-
-    private func relayoutParkedShelves() {
-        for id in parkedShelfOrder {
-            guard let panel = panels[id] else { continue }
-            animateParked(panel: panel, to: parkedFrame(for: id, on: panel.screen))
-        }
-    }
-
-    private func parkedFrame(for id: UUID, on screen: NSScreen?) -> NSRect {
-        let visible = screen?.visibleFrame
-            ?? NSScreen.main?.visibleFrame
-            ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
-        let index = parkedShelfOrder.firstIndex(of: id) ?? 0
-        let originX = visible.maxX - collapsedSize.width - parkMargin
-        let originY = visible.maxY - collapsedSize.height - parkMargin
-            - CGFloat(index) * (collapsedSize.height + parkSpacing)
-        return NSRect(
-            x: originX,
-            y: max(visible.minY + parkMargin, originY),
-            width: collapsedSize.width,
-            height: collapsedSize.height
-        )
     }
 
     // MARK: - Close on outside click
@@ -1086,6 +1170,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func animate(panel: NSPanel, to frame: NSRect) {
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            panel.setFrame(frame, display: true)
+            return
+        }
         suppressMoveCheck = true
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.45
@@ -1157,6 +1245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let cursor = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(cursor) } ?? NSScreen.main
         guard let frame = screen?.visibleFrame else { return }
+        let size = ShelfExpandedGeometry.fit(size, within: frame.size, margin: 12)
 
         let edgeMargin: CGFloat = 12
         let dockThreshold: CGFloat = 72
@@ -1203,21 +1292,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func positionPanelBelowStatusItem(_ panel: NSPanel, size: NSSize) {
+        let location = UserDefaults.standard.string(forKey: "shelf.defaultLocation") ?? "Menu bar"
+        if let position = ShelfScreenPosition(rawValue: location),
+           let frame = (statusItem.button?.window?.screen ?? NSScreen.main)?.visibleFrame {
+            let fitted = NSSize(width: min(size.width, max(1, frame.width - 24)), height: min(size.height, max(1, frame.height - 24)))
+            panel.setFrame(NSRect(origin: position.origin(for: fitted, in: frame), size: fitted), display: true)
+            return
+        }
         guard
             let button = statusItem.button,
             let buttonWindow = button.window
-        else { return }
+        else {
+            if let frame = NSScreen.main?.visibleFrame {
+                let fitted = ShelfExpandedGeometry.fit(size, within: frame.size)
+                panel.setFrame(NSRect(origin: ShelfScreenPosition.topRight.origin(for: fitted, in: frame), size: fitted), display: true)
+            }
+            return
+        }
 
         let buttonFrameOnScreen = buttonWindow.convertToScreen(
             button.convert(button.bounds, to: nil)
         )
         let screenFrame = buttonWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let size = ShelfExpandedGeometry.fit(size, within: screenFrame.size)
         let gap: CGFloat = 8
 
         var originX = buttonFrameOnScreen.midX - size.width / 2
         originX = max(screenFrame.minX + 8,
                       min(originX, screenFrame.maxX - size.width - 8))
-        let originY = buttonFrameOnScreen.minY - size.height - gap
+        let originY = max(screenFrame.minY + 8, buttonFrameOnScreen.minY - size.height - gap)
 
         panel.setFrame(NSRect(origin: NSPoint(x: originX, y: originY), size: size),
                        display: true)
@@ -1312,8 +1415,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Quit
 
     func applicationWillTerminate(_ notification: Notification) {
+        folderMonitor.stop()
+        for id in Array(parkJobs.keys) { cancelPark(id) }
         if let monitor = shortcutGlobalMonitor { NSEvent.removeMonitor(monitor) }
         if let monitor = shortcutLocalMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = pasteMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = outsideClickMonitor { NSEvent.removeMonitor(monitor) }
+        missingFileSweepTimer?.invalidate()
+        expiryTimer?.invalidate()
+        manager.flushStore()
         conversionService.cancelAll()
         ocrService.cancelAll()
     }
@@ -1328,20 +1438,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func handleShelfShortcut(_ event: NSEvent) -> Bool {
-        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.option, .shift] else { return false }
-        switch event.charactersIgnoringModifiers?.lowercased() {
-        case "a": if !event.isARepeat { newShelfFromClipboardAction() }; return true
-        case "c": if !event.isARepeat { captureScreenTextAction() }; return true
-        default: return false
+        guard !ShelfShortcut.recording, let shortcut = ShelfShortcut.allCases.first(where: { $0.matches(event) }) else { return false }
+        if !event.isARepeat {
+            switch shortcut {
+            case .new: newShelfAction()
+            case .clipboard: newShelfFromClipboardAction()
+            case .capture: captureScreenTextAction()
+            case .recordingControls:
+                if #available(macOS 15.0, *) { ShelfScreenRecorder.shared.openLauncher() }
+            case .stopRecording:
+                if #available(macOS 15.0, *) { Task { await ShelfScreenRecorder.shared.stop() } }
+            }
         }
+        return true
     }
 
     // MARK: - Paste shortcut
 
     private func installPasteShortcut() {
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             guard let (shelfID, _) = self.panels.first(where: { $0.value.isKeyWindow }) else {
+                return event
+            }
+            if ShelfToolRouter.activeShelves.contains(shelfID) {
+                let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                if event.keyCode == 53 || (modifiers == .command && event.charactersIgnoringModifiers?.lowercased() == "w") {
+                    NotificationCenter.default.post(name: .shelfToolBackRequested, object: shelfID)
+                    return nil
+                }
+                // Do not steal Cmd-A/C/V/Z from an action panel's text fields.
                 return event
             }
             guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else {
@@ -1378,10 +1504,10 @@ private struct ToastView: View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.circle.fill")
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.85))
+                .foregroundStyle(Color.primary.opacity(0.85))
             Text(message)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color.white.opacity(0.92))
+                .foregroundStyle(Color.primary.opacity(0.92))
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -1391,10 +1517,10 @@ private struct ToastView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(white: 0.16))
+                .fill(Color(nsColor: .windowBackgroundColor))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
                 )
         )
     }

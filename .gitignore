@@ -16,3 +16,14 @@ dist/
 .DS_Store
 .env*
 *private*key*
+
+# Local backups and build artifacts
+Backups/
+patch-backups/
+.build/
+dist/
+build.log
+*.dmg
+*.zip
+*.tar.gz
+.DS_Store

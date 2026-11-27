@@ -18,6 +18,7 @@ struct CollapsedShelfView: View {
     var onDragStart: () -> Void = {}
     var onDragEnd: () -> Void = {}
 
+    @AppStorage("shelf.intelligentNames") private var intelligentNames = false
     @AppStorage("shelf.activation") private var activation: ShelfActivation = .oneSecond
     @State private var stackHovering = false
     @State private var hoverTask: Task<Void, Never>?
@@ -38,17 +39,20 @@ struct CollapsedShelfView: View {
     private var shelf: Shelf? { manager.shelf(id: shelfID) }
 
     private var pillTitle: String {
-        if let n = shelf?.name, !n.isEmpty { return n }
+        if let n = shelf?.displayShelfName(intelligent: intelligentNames) { return n }
         if items.count == 1 { return items[0].displayName }
         return String(format: L("%lld Files"), items.count)
     }
 
     var body: some View {
         ZStack {
+            ShelfWindowDragHandle(onDoubleTap: {
+                if !items.isEmpty { onOpenDocuments() }
+            }, onEdge: onDock)
             if items.isEmpty {
                 Text(L("Drop files here"))
                     .font(.system(size: 14, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(0.55))
+                    .foregroundStyle(Color.primary.opacity(0.55))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .matchedGeometryEffect(id: ShelfMatchedGeometry.card, in: namespace)
 
@@ -96,7 +100,7 @@ struct CollapsedShelfView: View {
                         if shelf?.pinned == true {
                             Image(systemName: "pin.fill")
                                 .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(Color.white.opacity(0.75))
+                                .foregroundStyle(Color.primary.opacity(0.75))
                                 .padding(.trailing, 2)
                         }
                         ShelfActionMenu(manager: manager, shelfID: shelfID)
@@ -114,6 +118,11 @@ struct CollapsedShelfView: View {
                     .offset(y: -12)
             }
         }
+        .contentShape(Rectangle())
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            guard !items.isEmpty, !isDragging, !DragInitiatorView.hasActiveDrag else { return }
+            onOpenDocuments()
+        })
     }
 }
 
@@ -173,7 +182,8 @@ private struct StackedDocumentPreview: View {
                                             shelfID: shelfID
                                         )
                                     },
-                                    onDoubleClick: { onOpen() }
+                                    onDoubleClick: { onOpen() },
+                                    allowsShelfCelebration: true
                                 )
                             }
                         }
@@ -186,6 +196,7 @@ private struct StackedDocumentPreview: View {
             }
         }
         .frame(width: 160, height: 170)
+        .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeInOut(duration: 0.2), value: items.map(\.id))
     }
 
     /// Card footprint that honors the image's true aspect ratio so a landscape
@@ -235,10 +246,10 @@ private struct StackedDocumentPreview: View {
                     // QL preview pending — show a quiet skeleton sized at
                     // the photo's real aspect, not the JPEG-icon's aspect.
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.08))
+                        .fill(Color.primary.opacity(0.08))
                         .overlay(
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
+                                .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
                         )
                 } else if let thumb = item.thumbnail {
                     Image(nsImage: thumb)
@@ -331,10 +342,10 @@ private struct EmptyStackPreview: View {
         VStack(spacing: 6) {
             Image(systemName: "tray")
                 .font(.system(size: 22, weight: .regular))
-                .foregroundStyle(Color.white.opacity(0.38))
+                .foregroundStyle(Color.primary.opacity(0.38))
             Text(L("Drop or shake here"))
                 .font(.system(size: 11))
-                .foregroundStyle(Color.white.opacity(0.45))
+                .foregroundStyle(Color.primary.opacity(0.45))
                 .multilineTextAlignment(.center)
         }
         .padding(.horizontal, 8)
@@ -361,13 +372,13 @@ struct CircularIconButton: View {
         Button(action: action) {
             ZStack {
                 Circle()
-                    .fill(Color.white.opacity(hovering ? 0.20 : 0.10))
+                    .fill(Color.primary.opacity(hovering ? 0.20 : 0.10))
                     .overlay(
-                        Circle().strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5)
+                        Circle().strokeBorder(Color.primary.opacity(0.16), lineWidth: 0.5)
                     )
                 Image(systemName: systemName)
                     .font(.system(size: iconSize, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.92))
+                    .foregroundStyle(Color.primary.opacity(0.92))
             }
             .frame(width: size, height: size)
             .scaleEffect(hovering ? 1.08 : 1.0)
@@ -396,16 +407,16 @@ private struct DocumentsPill: View {
                     .font(.system(size: 12, weight: .semibold))
                     .offset(y: -1)
             }
-            .foregroundStyle(Color.white.opacity(0.95))
+            .foregroundStyle(Color.primary.opacity(0.95))
             .frame(height: 26)
             .padding(.horizontal, 10)
             .background(
                 Capsule(style: .continuous)
-                    .fill(Color.white.opacity(hovering ? 0.18 : 0.10))
+                    .fill(Color.primary.opacity(hovering ? 0.18 : 0.10))
             )
             .overlay(
                 Capsule(style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.16), lineWidth: 0.5)
+                    .strokeBorder(Color.primary.opacity(0.16), lineWidth: 0.5)
             )
             .scaleEffect(hovering ? 1.03 : 1.0)
         }
@@ -426,9 +437,9 @@ struct GrabHandle: View {
 
     var body: some View {
         Capsule(style: .continuous)
-            .fill(Color.white.opacity(hovering && glow ? 0.75 : 0.28))
+            .fill(Color.primary.opacity(hovering && glow ? 0.75 : 0.28))
             .frame(width: 40, height: 4)
-            .shadow(color: Color.white.opacity(hovering && glow ? 0.55 : 0),
+            .shadow(color: Color.primary.opacity(hovering && glow ? 0.55 : 0),
                     radius: hovering && glow ? 6 : 0)
             .padding(.vertical, 10)
             .padding(.horizontal, 16)

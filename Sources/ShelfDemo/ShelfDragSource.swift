@@ -18,6 +18,8 @@ struct ShelfDragOverlay: NSViewRepresentable {
     /// of shadows, scale effects, or sibling overlays), this lets us
     /// snapshot only the card and avoid pulling in the dark panel backdrop.
     var visibleCardSize: (() -> CGSize)? = nil
+    var allowsShelfCelebration = false
+    var coversWholeShelf: (() -> Bool)? = nil
 
     func makeNSView(context: Context) -> DragInitiatorView {
         let view = DragInitiatorView()
@@ -28,6 +30,8 @@ struct ShelfDragOverlay: NSViewRepresentable {
         view.onClick = onClick
         view.onDoubleClick = onDoubleClick
         view.visibleCardSize = visibleCardSize
+        view.allowsShelfCelebration = allowsShelfCelebration
+        view.coversWholeShelf = coversWholeShelf
         return view
     }
 
@@ -39,6 +43,8 @@ struct ShelfDragOverlay: NSViewRepresentable {
         nsView.onClick = onClick
         nsView.onDoubleClick = onDoubleClick
         nsView.visibleCardSize = visibleCardSize
+        nsView.allowsShelfCelebration = allowsShelfCelebration
+        nsView.coversWholeShelf = coversWholeShelf
     }
 }
 
@@ -54,9 +60,16 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
     private var mouseDownPoint: NSPoint?
     private var clickModifiers: NSEvent.ModifierFlags = []
     private var sessionActive = false
-    private var draggingPDF = false
+    var allowsShelfCelebration = false
+    var coversWholeShelf: (() -> Bool)? = nil
+    private var celebrateThisDrag = false
     private weak var dragSourceWindow: NSWindow?
     static private(set) var hasActiveDrag = false
+    static private(set) weak var activeSourceWindow: NSWindow?
+    private static var preserveCurrentDrag = false
+    static func preserveShelfForCurrentDrag() {
+        if hasActiveDrag { preserveCurrentDrag = true }
+    }
     private let dragThreshold: CGFloat = 4
 
     private static let promiseQueue: OperationQueue = {
@@ -81,6 +94,7 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
         // Claim hits when we can drag or when we offer a context menu.
         let hasDrag = !(provider?() ?? []).isEmpty
         let hasMenu = menuBuilder != nil
+        guard bounds.contains(convert(point, from: superview)) else { return nil }
         return (hasDrag || hasMenu) ? self : nil
     }
 
@@ -119,7 +133,7 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
             FileManager.default.fileExists(atPath: $0.path)
         }
         guard !urls.isEmpty else { return }
-        draggingPDF = urls.contains { $0.pathExtension.lowercased() == "pdf" }
+        celebrateThisDrag = coversWholeShelf?() ?? allowsShelfCelebration
 
         // Snapshot the actual rendered tile *before* notifying the source
         // (which fades the tile out). Use the caller-provided visible card
@@ -155,7 +169,9 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
                 .contentType?.identifier) ?? UTType.data.identifier
             let promise = FileURLPromiseProvider(fileType: typeID, delegate: self)
             promise.userInfo = url
-            let item = NSDraggingItem(pasteboardWriter: promise)
+            let writer: NSPasteboardWriting = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                ? (url as NSURL) : promise
+            let item = NSDraggingItem(pasteboardWriter: writer)
             let off = CGFloat(index) * 4
             let frame = NSRect(
                 x: snapshotRect.minX + off,
@@ -170,6 +186,8 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
         dragSourceWindow = window
         sessionActive = true
         Self.hasActiveDrag = true
+        Self.activeSourceWindow = window
+        Self.preserveCurrentDrag = false
         onStart?()
         let session = beginDraggingSession(with: draggingItems, event: event, source: self)
         session.animatesToStartingPositionsOnCancelOrFail = true
@@ -229,16 +247,19 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
     ) {
         sessionActive = false
         Self.hasActiveDrag = false
+        Self.activeSourceWindow = nil
+        let preserve = Self.preserveCurrentDrag
+        Self.preserveCurrentDrag = false
         let source = dragSourceWindow
         dragSourceWindow = nil
         onEnd?()
-        guard !operation.isEmpty,
+        guard !preserve, !operation.isEmpty,
               let source,
               !NSApp.windows.contains(where: { $0 is ShelfPanelMarker && $0.isVisible && $0.frame.contains(screenPoint) })
         else { return }
         // Hide only the originating shelf; keep its model and files intact.
-        let close = UserDefaults.standard.bool(forKey: "shelf.closeAfterDrag")
-        if draggingPDF && (UserDefaults.standard.object(forKey: "shelf.celebration") as? Bool ?? true)
+        let close = celebrateThisDrag && UserDefaults.standard.bool(forKey: "shelf.closeAfterDrag")
+        if close && (UserDefaults.standard.object(forKey: "shelf.celebration") as? Bool ?? true)
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             ShelfCelebration.show(around: source, close: close)
         } else if close { source.orderOut(nil) }
@@ -267,8 +288,8 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
             return
         }
         do {
-            if FileManager.default.fileExists(atPath: url.path) {
-                try FileManager.default.removeItem(at: url)
+            guard !FileManager.default.fileExists(atPath: url.path) else {
+                throw CocoaError(.fileWriteFileExists)
             }
             try FileManager.default.copyItem(at: sourceURL, to: url)
             completionHandler(nil)

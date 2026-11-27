@@ -35,14 +35,14 @@ DMG_NAME="$(basename "${DMG}")"
 cat <<XML
         <item>
             <title>DropShelf ${VERSION}</title>
-            <link>https://github.com/iamsumanp/DropShelf/releases/tag/v${VERSION}</link>
+            <link>https://github.com/giteshkukreja19/DropShelf/releases/tag/v${VERSION}</link>
             <sparkle:version>${VERSION}</sparkle:version>
             <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
             <pubDate>${PUBDATE}</pubDate>
-            <description><![CDATA[See release notes at https://github.com/iamsumanp/DropShelf/releases/tag/v${VERSION}]]></description>
+            <description><![CDATA[See release notes at https://github.com/giteshkukreja19/DropShelf/releases/tag/v${VERSION}]]></description>
             <enclosure
-                url="https://github.com/iamsumanp/DropShelf/releases/download/v${VERSION}/${DMG_NAME}"
+                url="https://github.com/giteshkukreja19/DropShelf/releases/download/v${VERSION}/${DMG_NAME}"
                 ${SIG_LINE}
                 type="application/octet-stream" />
         </item>

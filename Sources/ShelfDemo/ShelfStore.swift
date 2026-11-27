@@ -6,6 +6,7 @@ private struct PersistedShelfItem: Codable {
     let type: String          // "file" | "image" | "text"
     let bookmark: Data?
     let text: String?
+    let translation: ShelfOCRMetadata?
     let createdAt: Date
 }
 
@@ -53,7 +54,7 @@ final class ShelfStore {
                     throw CocoaError(.fileNoSuchFile)
                 }
                 let data = try copied.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
-                return PersistedShelfItem(id: record.id, type: record.type, bookmark: data, text: record.text, createdAt: record.createdAt)
+                return PersistedShelfItem(id: record.id, type: record.type, bookmark: data, text: record.text, translation: record.translation, createdAt: record.createdAt)
             }
             return PersistedShelf(id: shelf.id, createdAt: shelf.createdAt, items: items, name: shelf.name, pinned: shelf.pinned, accent: shelf.accent)
         }
@@ -105,6 +106,7 @@ final class ShelfStore {
             type: typeKey(item.type),
             bookmark: bookmark,
             text: item.textContent,
+            translation: item.translation,
             createdAt: item.createdAt
         )
     }
@@ -165,7 +167,8 @@ final class ShelfStore {
                         fileURL: url,
                         textContent: text,
                         thumbnail: nil,
-                        createdAt: record.createdAt
+                        createdAt: record.createdAt,
+                        translation: record.translation
                     ))
                 }
             }

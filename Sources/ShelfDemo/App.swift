@@ -445,6 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let recent = NSMenuItem(title: L("Recent Shelves"), action: nil, keyEquivalent: "")
         recent.submenu = buildRecentShelvesMenu()
         menu.addItem(recent)
+        if ShelfFavouriteItems.enabled && ShelfFavouriteItems.showInMenuBar { menu.addItem(ShelfFavouriteItems.menuItem()) }
 
         menu.addItem(.separator())
 
@@ -745,7 +746,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             do {
                 guard let text = try await ScreenOCR.captureAndExtractText() else { return }
                 let shelfID = activeOrNewShelfID()
-                manager.addText(text, to: shelfID)
+                manager.addText(text.text, to: shelfID, translation: text.metadata)
                 openPanel(for: shelfID, nearCursor: false)
                 if let panel = panels[shelfID] {
                     if dockedShelfIDs.contains(shelfID) {
@@ -1448,6 +1449,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if #available(macOS 15.0, *) { ShelfScreenRecorder.shared.openLauncher() }
             case .stopRecording:
                 if #available(macOS 15.0, *) { Task { await ShelfScreenRecorder.shared.stop() } }
+            case .pauseRecording:
+                if #available(macOS 15.0, *) { ShelfScreenRecorder.shared.togglePause() }
             }
         }
         return true

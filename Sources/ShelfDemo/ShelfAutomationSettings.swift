@@ -12,8 +12,9 @@ struct ShelfFolderRule: Codable, Identifiable, Equatable, Sendable {
     var recursive = false
     var delayProcessing = false
     var nameContains = ""
+    var organization: ShelfOrganizationRule?
     init(path: String) { self.path = path }
-    private enum CodingKeys: String, CodingKey { case id, path, enabled, filter, newShelf, recursive, delayProcessing, nameContains }
+    private enum CodingKeys: String, CodingKey { case id, path, enabled, filter, newShelf, recursive, delayProcessing, nameContains, organization }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -24,6 +25,7 @@ struct ShelfFolderRule: Codable, Identifiable, Equatable, Sendable {
         recursive = try c.decodeIfPresent(Bool.self, forKey: .recursive) ?? false
         delayProcessing = try c.decodeIfPresent(Bool.self, forKey: .delayProcessing) ?? false
         nameContains = try c.decodeIfPresent(String.self, forKey: .nameContains) ?? ""
+        organization = try c.decodeIfPresent(ShelfOrganizationRule.self, forKey: .organization)
     }
 }
 struct ShelfFavourite: Codable, Identifiable, Equatable {
@@ -243,6 +245,7 @@ private struct MonitorFolderDetails: View {
             Picker("File types", selection: $rule.filter) { ForEach(["All files", "Images", "PDFs", "Documents"], id: \.self) { Text($0).tag($0) } }
             HStack { TextField("Filename contains (optional)", text: $rule.nameContains); MonitorHelp(text: "Only collect files whose names contain this text. Leave empty to accept all names matching the file type.") }
             Divider()
+            ShelfOrganizationSettings(rule: $rule)
             HStack { Button("Delete", role: .destructive) { confirm = true }; Spacer(); Button("Cancel", action: cancel); Button("Done") { save(rule) }.keyboardShortcut(.defaultAction) }
         }.padding(24).frame(width: 480)
         .confirmationDialog("Stop monitoring this folder? Your files will not be deleted.", isPresented: $confirm) { Button("Remove folder", role: .destructive, action: remove); Button("Cancel", role: .cancel) {} }

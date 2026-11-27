@@ -41,8 +41,18 @@ final class ShelfFolderMonitor {
                         if !rule.delayProcessing || Date().timeIntervalSince(state.lastDetection) >= 3 {
                             let batch = state.queued.keys.sorted { $0.path < $1.path }
                             state.queued.removeAll()
-                            if rule.newShelf { for url in batch { deliver(rule, [url]) } }
-                            else if !batch.isEmpty { deliver(rule, batch) }
+                            var delivered = batch
+                            if !batch.isEmpty, let organization = rule.organization, organization.action != "Collect only" {
+                                let monitored = ShelfAutomationPreferences.rules()
+                                let result = await Task.detached(priority: .utility) { ShelfOrganization.organize(batch, rule: organization, monitors: monitored) }.value
+                                ShelfOrganization.record(result.events)
+                                delivered = result.urls
+                                if let failure = result.events.first(where: { $0.output == nil }) { UserDefaults.standard.set(failure.message, forKey: "shelf.monitor.status." + rule.id.uuidString) }
+                            }
+                            if !Task.isCancelled && ShelfAutomationPreferences.rules().contains(rule) {
+                                if rule.newShelf { for url in delivered { deliver(rule, [url]) } }
+                                else if !delivered.isEmpty { deliver(rule, delivered) }
+                            }
                         }
                         self.states[rule.id] = state
                     }

@@ -127,7 +127,7 @@ private final class ShelfActionTargets: NSObject {
         Task { @MainActor in
             do {
                 if let text = try await ScreenOCR.captureAndExtractText() {
-                    mgr.addText(text, to: sID)
+                    mgr.addText(text.text, to: sID, translation: text.metadata)
                 }
             } catch let error as OCRError {
                 guard error != .cancelled else { return }

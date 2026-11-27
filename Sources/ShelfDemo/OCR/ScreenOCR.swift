@@ -10,7 +10,7 @@ enum ScreenOCR {
     /// Copies extracted text to the general pasteboard and returns it.
     /// Returns `nil` if the user cancels (e.g. presses Escape or clicks without dragging).
     @discardableResult
-    static func captureAndExtractText() async throws -> String? {
+    static func captureAndExtractText() async throws -> ShelfOCRResult? {
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("ScreenOCR-\(UUID().uuidString).png")
         defer {
@@ -48,12 +48,12 @@ enum ScreenOCR {
 
         let text = try await ImageOCR.extractText(source: tempURL)
 
+        let result = await ShelfOCRTranslation.process(text)
         await MainActor.run {
             let pb = NSPasteboard.general
             pb.clearContents()
-            pb.setString(text, forType: .string)
+            pb.setString(result.text, forType: .string)
         }
-
-        return text
+        return result
     }
 }

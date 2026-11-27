@@ -120,7 +120,7 @@ struct SettingsView: View {
     @AppStorage("shelf.showInDock") private var showInDock = false
     @AppStorage("shelf.showInMenuBar") private var showInMenuBar = true
     @AppStorage("shelf.menuBarIconStyle") private var menuBarIconStyle = "Traditional"
-    private let sections = ["Shelf Activation", "Shelf Interaction", "General", "Cloud Sharing", "Custom Actions", "Instant Actions", "Folder Monitoring", "PDF & File Tools", "Capture Studio", "About & Updates"]
+    private let sections = ["Shelf Activation", "Shelf Interaction", "General", "Cloud Sharing", "Custom Actions", "Instant Actions", "Folder Monitoring", "File & Text Tools", "Capture Studio", "About & Updates"]
     private let symbols = ["cursorarrow", "rectangle.on.rectangle", "gearshape", "cloud", "slider.horizontal.3", "bolt", "folder.badge.plus", "doc.text", "video", "info.circle"]
     var body: some View {
         HStack(spacing: 0) {
@@ -310,7 +310,7 @@ struct SettingsView: View {
                         case "Capture Studio":
                             ShelfRecorderSettings()
 
-                        case "PDF & File Tools":
+                        case "File & Text Tools":
                             pdfSettings
 
                         default:
@@ -350,15 +350,15 @@ struct SettingsView: View {
 
     private var sectionDescription: String {
         switch section {
-        case "Shelf Activation": return "Choose how and where new shelves appear."
-        case "Shelf Interaction": return "Personalize shelf behavior, appearance and timing."
+        case "Shelf Activation": return "Choose when and where new shelves appear."
+        case "Shelf Interaction": return "Customize shelf appearance, behavior and timing."
         case "General": return "Manage storage, language and startup preferences."
         case "Cloud Sharing": return "Manage your existing cloud folder workflow."
         case "Custom Actions": return "Save frequently used image and document action parameters."
         case "Instant Actions": return "Quickly share items directly from a shelf."
         case "Folder Monitoring": return "Collect new files from selected folders."
         case "Capture Studio": return "Record your screen and save videos locally."
-        case "PDF & File Tools": return "Configure document conversion preferences."
+        case "File & Text Tools": return "Configure document conversion preferences."
         default: return "Manage DropShelf update preferences."
         }
     }
@@ -500,6 +500,7 @@ struct SettingsView: View {
             Divider()
             ShelfDataLocationSettings()
         }
+        settingsGroup("Favourite items") { ShelfFavouriteSettings() }
         settingsGroup("Favourite locations") { ShelfAutomationSettings(monitoring: false) }
         settingsGroup("Storage and preferences") {
             VStack(alignment: .leading, spacing: 6) {
@@ -554,9 +555,16 @@ struct SettingsView: View {
         }
     }
     @ViewBuilder private var pdfSettings: some View {
+        settingsGroup("OCR Translation") {
+            if #available(macOS 15.0, *) {
+                ShelfOCRTranslationSettings()
+            } else {
+                note("Screen translation requires macOS 15 or later. OCR remains available.")
+            }
+        }
         settingsGroup("Document conversion") {
             choice("PDF to Word mode", selection: $pdfWordMode, options: [("automatic", "Automatic"), ("editable", "Editable Word"), ("appearance", "Preserve appearance")])
-            Text("Automatic preserves scanned pages as images. Editable mode uses OCR for scans; formatting may be lost.")
+            Text("Automatic uses editable layout for text PDFs and preserves page images for scanned or mixed PDFs. Preserve appearance keeps fonts, borders and graphics visually but is not editable. Editable Word uses OCR for scans; complex formatting may be lost.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

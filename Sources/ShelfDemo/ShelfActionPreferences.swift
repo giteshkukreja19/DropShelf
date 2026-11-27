@@ -5,6 +5,7 @@ import SwiftUI
 enum ShelfActionPreferences {
     static let groups: [(String, [String])] = [
         ("General Actions", ["Get Info", "Rename…", "Batch Rename…", "Create ZIP Archive…", "Copy Path", "Copy to…", "Move to…", "Move to Trash", "Duplicate"]),
+        ("Video Actions", ["Trim Video…"]),
         ("Image Actions", ["Resize Images…", "Convert Image Format…", "Compress Images…", "Remove Image Metadata", "Stitch Images…", "Create PDF…"]),
         ("Document Actions", ["Merge PDFs…", "Split PDF into Pages…", "Extract / Reorder PDF Pages…", "Delete PDF Pages…", "Compress PDF…", "Password Protect PDF…", "Convert PDF to Word (.docx)…", "Convert Word to PDF…", "Create Combined PDF…", "Merge Word Documents…", "Rotate PDF Pages 90°…", "Extract PDF Text…", "Extract Word Text…"])
     ]

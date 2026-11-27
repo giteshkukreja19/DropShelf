@@ -60,7 +60,72 @@ with pymupdf.open(sys.argv[1]) as pdf:
                 q.paragraph_format.line_spacing = Pt(1)
 out.save(sys.argv[2])
 """#
-        let layoutScript = "from pdf2docx import Converter; import sys; c=Converter(sys.argv[1]); c.convert(sys.argv[2], multi_processing=False); c.close()"
+        let layoutScript = #"""
+from pdf2docx import Converter
+import sys, zipfile
+from docx import Document
+c = Converter(sys.argv[1])
+try:
+    c.convert(sys.argv[2], multi_processing=False, ignore_page_error=False,
+              parse_lattice_table=True, parse_stream_table=True)
+finally:
+    c.close()
+with zipfile.ZipFile(sys.argv[2]) as archive:
+    if archive.testzip() is not None:
+        raise RuntimeError("Invalid Word archive")
+doc = Document(sys.argv[2])
+if not (doc.paragraphs or doc.tables or doc.inline_shapes):
+    raise RuntimeError("Empty Word conversion")
+# Recover source span styling only where the exact run text has one unambiguous style.
+# Do not guess styles for merged or ambiguous text, or alter the converter's layout.
+import pymupdf, re
+from collections import defaultdict
+from docx.shared import Pt, RGBColor
+from docx.text.paragraph import Paragraph
+from docx.oxml.ns import qn
+styles = defaultdict(set)
+def normalized(text):
+    return " ".join(text.split())
+with pymupdf.open(sys.argv[1]) as source:
+    for page in source:
+        for block in page.get_text("dict")["blocks"]:
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    key = normalized(span.get("text", ""))
+                    if not key or len(key) < 2:
+                        continue
+                    font = re.sub(r"^[A-Z]{6}\+", "", span.get("font", ""))
+                    size = round(float(span.get("size", 0)), 2)
+                    flags = int(span.get("flags", 0))
+                    color = int(span.get("color", 0)) & 0xffffff
+                    styles[key].add((font, size, bool(flags & 16), bool(flags & 2), color))
+for node in doc.element.body.iter(qn("w:p")):
+    paragraph = Paragraph(node, doc)
+    for run in paragraph.runs:
+        if run._r.find(qn("w:drawing")) is not None:
+            continue
+        candidates = styles.get(normalized(run.text), set())
+        if len(candidates) != 1:
+            continue
+        font, size, bold, italic, color = next(iter(candidates))
+        # Known PDF/PostScript family aliases; retain converter font for unknown names
+        # unless it has no explicit font, in which case keep the recoverable name.
+        aliases = {"Helvetica": "Arial", "Times-Roman": "Times New Roman", "Courier": "Courier New"}
+        family = aliases.get(font)
+        if family is None:
+            for prefix, family_name in (("Helvetica-", "Arial"), ("Times-", "Times New Roman"), ("Courier-", "Courier New"), ("Arial", "Arial"), ("TimesNewRoman", "Times New Roman"), ("Calibri", "Calibri")):
+                if font.startswith(prefix):
+                    family = family_name
+                    break
+        if family or (font and run.font.name is None):
+            run.font.name = family or font
+        if 1 <= size <= 300:
+            run.font.size = Pt(size)
+        run.bold = bold
+        run.italic = italic
+        run.font.color.rgb = RGBColor((color >> 16) & 255, (color >> 8) & 255, color & 255)
+doc.save(sys.argv[2])
+"""#
         process.arguments = ["-c", appearance ? appearanceScript : layoutScript, url.path, output.path]
         process.standardOutput = handle
         process.standardError = handle
@@ -99,7 +164,7 @@ out.save(sys.argv[2])
             !(pdf.page(at: index)?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         let mode = UserDefaults.standard.string(forKey: "pdf.wordMode") ?? "automatic"
-        if mode == "appearance" {
+        if mode == "appearance" || (mode == "automatic" && !hasText) {
             return try convertLayout(url, cancelled: cancelled, appearance: true)
         }
         if hasText { return try convertLayout(url, cancelled: cancelled) }

@@ -56,11 +56,13 @@ enum SmartFileActions {
             menu.addItem(row)
         }
         if appended || !actions.isEmpty { menu.addItem(.separator()) }
+        if urls.count == items.count { ShelfPhaseOneActions.append(to: menu, urls: urls, target: target, selector: selector) }
         let general = NSMenuItem(title: "General Actions", action: nil, keyEquivalent: ""); general.isEnabled = false; menu.addItem(general)
     }
     static func run(_ sender: NSMenuItem, items: [ShelfItem], manager: ShelfManager, shelfID: UUID) {
         guard let raw = sender.representedObject as? String else { return }
         let urls = files(items)
+        if raw.hasPrefix("phase1:") { if urls.count == items.count { ShelfPhaseOneActions.run(raw, urls: urls, manager: manager, shelfID: shelfID) }; return }
         if let preset = ShelfCustomAction.load().first(where: { $0.id.uuidString == raw && $0.enabled }) {
             if ["zip", "move", "copy", "open", "rename", "ocr"].contains(preset.kind) {
                 let selected = items.compactMap(\.fileURL)

@@ -31,7 +31,8 @@ BUNDLE_ID="com.boski.dropshelf"
 # VERSION drives both CFBundleShortVersionString and CFBundleVersion so the
 # value Sparkle compares (sparkle:version vs CFBundleVersion) lines up with
 # the same dotted form we publish in appcast.xml.
-VERSION="2.0.0"
+VERSION="2.1.0"
+BUILD_VERSION="2.1.10"
 MIN_OS="13.0"
 
 APP_DIR="dist/${APP_NAME}.app"
@@ -105,9 +106,10 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>${APP_NAME}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
-  <key>CFBundleVersion</key><string>${VERSION}</string>
+  <key>CFBundleVersion</key><string>${BUILD_VERSION}</string>
   <key>LSMinimumSystemVersion</key><string>${MIN_OS}</string>
   <key>NSCameraUsageDescription</key><string>Record your camera bubble when enabled.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Transcribe your microphone while recording when live speech recognition is enabled.</string>
   <key>NSMicrophoneUsageDescription</key><string>Record your voice when enabled.</string>
   <key>LSUIElement</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
@@ -132,24 +134,5 @@ codesign --force --deep --sign - "${SPARKLE_FX}"
 codesign --force --deep --sign - "${APP_DIR}"
 codesign --verify --deep --strict --verbose=2 "${APP_DIR}"
 
-echo "==> Building DMG"
-mkdir -p "${DMG_ROOT}"
-cp -R "${APP_DIR}" "${DMG_ROOT}/${APP_NAME}.app"
-ln -sfn /Applications "${DMG_ROOT}/Applications"
-cat > "${DMG_ROOT}/Read Me.txt" <<EOF
-DropShelf ${VERSION}
-
-Drag DropShelf.app onto Applications to install.
-Quit any running copy before replacing it.
-Your saved shelves and preferences remain in their existing data location.
-This build is ad-hoc signed and not notarized.
-EOF
-
-rm -f "${DMG_PATH}"
-hdiutil create -volname "${APP_NAME} ${VERSION}" -srcfolder "${DMG_ROOT}" -ov -format UDZO "${DMG_PATH}"
-rm -rf "${DMG_ROOT}"
-
-echo
-echo "Done. Built: ${DMG_PATH}"
-echo "First launch on a new machine (ad-hoc signed, not notarized):"
-echo "  xattr -dr com.apple.quarantine /Applications/${APP_NAME}.app"
+echo "==> Building release DMG"
+python3 scripts/build-release-installer.py "$APP_DIR" "$DMG_PATH"

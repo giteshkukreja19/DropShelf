@@ -2,18 +2,18 @@ import AppKit
 import SwiftUI
 
 enum ShelfShortcut: String, CaseIterable, Identifiable {
-    case new, clipboard, capture, recordingControls, stopRecording
+    case new, clipboard, capture, recordingControls, stopRecording, pauseRecording
     var id: String { rawValue }
     static var recording = false
     static let mask: NSEvent.ModifierFlags = [.command, .option, .shift, .control]
     var title: String {
-        switch self { case .new: return "New Shelf"; case .clipboard: return "New Shelf From Clipboard"; case .capture: return "Capture Screen Text"; case .recordingControls: return "Open Capture Studio"; case .stopRecording: return "Stop Screen Recording" }
+        switch self { case .new: return "New Shelf"; case .clipboard: return "New Shelf From Clipboard"; case .capture: return "Capture Screen Text"; case .recordingControls: return "Open Capture Studio"; case .stopRecording: return "Stop Screen Recording"; case .pauseRecording: return "Pause / Resume Recording" }
     }
-    var defaultKey: String { switch self { case .new: return "n"; case .clipboard: return "a"; case .capture: return "c"; case .recordingControls: return "r"; case .stopRecording: return "s" } }
+    var defaultKey: String { switch self { case .new: return "n"; case .clipboard: return "a"; case .capture: return "c"; case .recordingControls: return "r"; case .stopRecording: return "s"; case .pauseRecording: return "p" } }
     var prefix: String { "shortcut." + rawValue }
     var enabled: Bool { UserDefaults.standard.object(forKey: prefix + ".enabled") as? Bool ?? true }
     var key: String { UserDefaults.standard.string(forKey: prefix + ".key") ?? defaultKey }
-    var flags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: UInt(UserDefaults.standard.object(forKey: prefix + ".flags") as? Int ?? Int((self == .recordingControls || self == .stopRecording ? NSEvent.ModifierFlags([.command, .option, .shift]) : NSEvent.ModifierFlags([.option, .shift])).rawValue))) }
+    var flags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: UInt(UserDefaults.standard.object(forKey: prefix + ".flags") as? Int ?? Int((self == .recordingControls || self == .stopRecording || self == .pauseRecording ? NSEvent.ModifierFlags([.command, .option, .shift]) : NSEvent.ModifierFlags([.option, .shift])).rawValue))) }
     var label: String { (flags.contains(.control) ? "⌃" : "") + (flags.contains(.option) ? "⌥" : "") + (flags.contains(.shift) ? "⇧" : "") + (flags.contains(.command) ? "⌘" : "") + key.uppercased() }
     func matches(_ event: NSEvent) -> Bool { enabled && event.modifierFlags.intersection(Self.mask) == flags && event.charactersIgnoringModifiers?.lowercased() == key }
     func configure(_ item: NSMenuItem) { item.keyEquivalent = enabled ? key : ""; item.keyEquivalentModifierMask = flags }

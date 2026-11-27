@@ -10,6 +10,7 @@ cd "$(dirname "$0")/.."
 
 DMG="${1:-DropShelf.dmg}"
 VERSION="${2:-}"
+BUILD_VERSION="${3:-${VERSION}}"
 
 if [ -z "${VERSION}" ]; then
   echo "Usage: $0 <DMG path> <version>"
@@ -36,7 +37,7 @@ cat <<XML
         <item>
             <title>DropShelf ${VERSION}</title>
             <link>https://github.com/giteshkukreja19/DropShelf/releases/tag/v${VERSION}</link>
-            <sparkle:version>${VERSION}</sparkle:version>
+            <sparkle:version>${BUILD_VERSION}</sparkle:version>
             <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
             <pubDate>${PUBDATE}</pubDate>

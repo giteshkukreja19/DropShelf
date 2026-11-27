@@ -1,5 +1,19 @@
 # DropShelf
 
+## What’s new in v2.1.0
+
+- Capture Studio: recording setup, compact controls, pause/resume, restart, discard and configurable countdown.
+- Live microphone speech recognition, optional captions and TXT/SRT transcript export.
+- Remove Silent Parts and video trimming.
+- Quick Screen Translation using Apple Translation on supported macOS versions.
+- Image background removal, favourite items and automatic file organization.
+- Expanded document conversion and improved PDF-to-Word formatting (complex layouts may vary).
+- Redesigned installer and File & Text Tools settings.
+
+Apple Silicon; macOS 13 or later, with newer versions required for some features. Ad-hoc signed, not notarized.
+
+[Download v2.1.0](https://github.com/giteshkukreja19/DropShelf/releases/tag/v2.1.0)
+
 
 ## What's New in v2.0.0
 
@@ -127,9 +141,9 @@ DropShelf ships with Sparkle 2.x for in-app updates from v1.5.0 onward. Each rel
 
 **Per release:**
 
-1. Bump `VERSION` in `scripts/build-dmg.sh` (drives both `CFBundleShortVersionString` and `CFBundleVersion`, which Sparkle compares against `sparkle:version` in the appcast).
+1. Set the display `VERSION` and increasing `BUILD_VERSION` in `scripts/build-dmg.sh`.
 2. `bash scripts/build-dmg.sh` — produces `DropShelf.dmg` with Sparkle.framework embedded and the feed URL + public key baked into Info.plist.
-3. `bash scripts/sign-appcast.sh DropShelf.dmg <version>` — prints an appcast `<item>` snippet with the signed enclosure to stdout.
+3. `bash scripts/sign-appcast.sh DropShelf.dmg <version> <build-version>` — prints an appcast `<item>` snippet with the signed enclosure to stdout.
 4. Prepend that snippet inside the `<channel>` block in `appcast.xml`.
 5. `gh release create v<version> DropShelf.dmg --title "DropShelf v<version>" --notes "..."`
 6. `git add appcast.xml && git commit -m "release: v<version>" && git push origin main`

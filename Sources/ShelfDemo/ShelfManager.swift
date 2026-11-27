@@ -412,7 +412,8 @@ final class ShelfManager: ObservableObject {
             pixelSize: old.pixelSize,
             pageCount: old.pageCount,
             isDirectory: old.isDirectory,
-            cachedFolderBytes: old.cachedFolderBytes
+            cachedFolderBytes: old.cachedFolderBytes,
+            translation: old.translation
         )
     }
 
@@ -486,7 +487,8 @@ final class ShelfManager: ObservableObject {
             pixelSize: old.pixelSize,
             pageCount: old.pageCount,
             isDirectory: old.isDirectory,
-            cachedFolderBytes: bytes
+            cachedFolderBytes: bytes,
+            translation: old.translation
         )
     }
 
@@ -511,13 +513,13 @@ final class ShelfManager: ObservableObject {
 
 
     @discardableResult
-    func addText(_ text: String, to shelfID: UUID) -> ShelfItem? {
+    func addText(_ text: String, to shelfID: UUID, translation: ShelfOCRMetadata? = nil) -> ShelfItem? {
         guard index(of: shelfID) != nil else { return nil }
         // Stage a backing temp .txt so Open / Reveal-in-Finder work. The
         // snippet preview still renders from `textContent`; the fileURL is
         // there purely to make the standard file actions reachable.
         let url = ShelfItem.writeTextToTemp(text)
-        let item = ShelfItem(type: .text, fileURL: url, textContent: text)
+        let item = ShelfItem(type: .text, fileURL: url, textContent: text, translation: translation)
         addItem(item, to: shelfID)
         return item
     }
@@ -586,7 +588,8 @@ final class ShelfManager: ObservableObject {
                     pixelSize: old.pixelSize,
                     pageCount: old.pageCount,
                     isDirectory: old.isDirectory,
-                    cachedFolderBytes: old.cachedFolderBytes
+                    cachedFolderBytes: old.cachedFolderBytes,
+            translation: old.translation
                 )
                 // Crossfade the skeleton/icon → real preview swap so it
                 // doesn't read as a hard pop.

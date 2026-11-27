@@ -1906,6 +1906,17 @@ private struct DocumentGridItem: View {
                     )
                 previewContent
                     .padding(12)
+                if let translation = item.translation {
+                    VStack {
+                        Spacer()
+                        Text(translation.targetName)
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(Color.black.opacity(0.7))
+                            .lineLimit(1)
+                            .padding(3)
+                            .background(Color.white.opacity(0.95), in: RoundedRectangle(cornerRadius: 3))
+                    }.frame(maxWidth: .infinity, alignment: .trailing).padding(4)
+                }
             }
         }
     }

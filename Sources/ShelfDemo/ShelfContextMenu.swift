@@ -29,6 +29,17 @@ final class ShelfItemActions: NSObject {
         self.ocrService = ocrService
     }
 
+    @objc func trimVideo() {
+        guard #available(macOS 15.0, *), selectedItems.count == 1,
+              let url = selectedItems.first?.fileURL, ShelfTrimWindow.supports(url) else { return }
+        ShelfTrimWindow.open(url) { [weak manager = self.manager, shelfID = self.shelfID] result in
+            if let manager, manager.shelf(id: shelfID) != nil { _ = manager.addFile(url: result, to: shelfID) }
+            else { NSWorkspace.shared.activateFileViewerSelecting([result]) }
+        }
+    }
+
+    @objc func toggleFavouriteItem() { ShelfFavouriteItems.toggle(item) }
+
     @objc func smartAction(_ sender: NSMenuItem) {
         guard let manager else { return }
         SmartFileActions.run(sender, items: selectedItems, manager: manager, shelfID: shelfID)
@@ -96,6 +107,18 @@ final class ShelfItemActions: NSObject {
         } else if let text = item.textContent {
             pb.writeObjects([text as NSString])
         }
+    }
+
+    @objc func copyOriginalOCRText() {
+        guard let original = item.translation?.original else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(original, forType: .string)
+    }
+
+    @objc func copyTranslatedOCRText() {
+        guard let text = item.textContent else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     @objc func share() {
@@ -269,7 +292,7 @@ final class ShelfItemActions: NSObject {
         Task { @MainActor in
             do {
                 if let text = try await ScreenOCR.captureAndExtractText() {
-                    mgr.addText(text, to: sID)
+                    mgr.addText(text.text, to: sID, translation: text.metadata)
                 }
             } catch let error as OCRError {
                 guard error != .cancelled else { return }
@@ -344,6 +367,20 @@ enum ShelfContextMenu {
         )
         copy.target = actions
         menu.addItem(copy)
+        if ShelfFavouriteItems.enabled {
+            let favourite = NSMenuItem(title: ShelfFavouriteItems.contains(item) ? "Remove from Favourites" : "Add to Favourites", action: #selector(ShelfItemActions.toggleFavouriteItem), keyEquivalent: "")
+            favourite.target = actions
+            favourite.image = NSImage(systemSymbolName: "star", accessibilityDescription: nil)
+            menu.addItem(favourite)
+        }
+        if item.translation != nil {
+            let translated = NSMenuItem(title: "Copy Translated Text", action: #selector(ShelfItemActions.copyTranslatedOCRText), keyEquivalent: "")
+            translated.target = actions
+            menu.addItem(translated)
+            let original = NSMenuItem(title: "Copy Original OCR Text", action: #selector(ShelfItemActions.copyOriginalOCRText), keyEquivalent: "")
+            original.target = actions
+            menu.addItem(original)
+        }
         if actions.selectedItems.contains(where: { $0.fileURL != nil }) {
             menu.addItem(ShelfFavouriteMenu.make(title: "Copy to…", symbol: "folder", target: actions, selector: #selector(ShelfItemActions.copySelectedToFavourite(_:)), direct: #selector(ShelfItemActions.copySelectedToFolder), enabled: true))
             menu.addItem(ShelfFavouriteMenu.make(title: "Move to…", symbol: "folder.badge.arrow.forward", target: actions, selector: #selector(ShelfItemActions.moveSelectedToFavourite(_:)), direct: #selector(ShelfItemActions.moveSelectedToFolder), enabled: true))
@@ -463,6 +500,12 @@ enum ShelfContextMenu {
     ) -> NSMenu {
         let menu = NSMenu()
         SmartFileActions.append(to: menu, items: actions.selectedItems, target: actions, selector: #selector(ShelfItemActions.smartAction(_:)))
+        if #available(macOS 15.0, *), actions.selectedItems.count == 1,
+           let url = actions.selectedItems.first?.fileURL, ShelfTrimWindow.supports(url) {
+            let trim = NSMenuItem(title: "Trim Video…", action: #selector(ShelfItemActions.trimVideo), keyEquivalent: "")
+            trim.target = actions; trim.image = NSImage(systemSymbolName: "scissors", accessibilityDescription: nil)
+            menu.addItem(trim)
+        }
 
         if let submenu = ConversionMenu.makeSubmenu(
             items: actions.selectedItems,

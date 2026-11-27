@@ -15,6 +15,7 @@ struct ShelfItem: Identifiable, Equatable {
     let type: ItemType
     let fileURL: URL?
     let textContent: String?
+    let translation: ShelfOCRMetadata?
     let thumbnail: NSImage?
     let thumbnailIsIcon: Bool
     let createdAt: Date
@@ -39,12 +40,14 @@ struct ShelfItem: Identifiable, Equatable {
         pixelSize: CGSize? = nil,
         pageCount: Int? = nil,
         isDirectory: Bool = false,
-        cachedFolderBytes: Int64? = nil
+        cachedFolderBytes: Int64? = nil,
+        translation: ShelfOCRMetadata? = nil
     ) {
         self.id = id
         self.type = type
         self.fileURL = fileURL
         self.textContent = textContent
+        self.translation = translation
         self.thumbnail = thumbnail
         self.thumbnailIsIcon = thumbnailIsIcon
         self.createdAt = createdAt
@@ -129,7 +132,7 @@ struct ShelfItem: Identifiable, Equatable {
             return parts.joined(separator: " · ")
         case .text:
             let chars = textContent?.count ?? 0
-            return "Text · \(chars) chars"
+            return translation?.label ?? "Text · \(chars) chars"
         }
     }
 

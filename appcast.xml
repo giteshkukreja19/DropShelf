@@ -5,6 +5,19 @@
         <link>https://raw.githubusercontent.com/giteshkukreja19/DropShelf/main/appcast.xml</link>
         <description>Latest DropShelf releases.</description>
         <language>en</language>
+<item>
+            <title>DropShelf 2.1.0</title>
+            <link>https://github.com/giteshkukreja19/DropShelf/releases/tag/v2.1.0</link>
+            <sparkle:version>2.1.10</sparkle:version>
+            <sparkle:shortVersionString>2.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <pubDate>Fri, 27 Nov 2026 19:13:13 +0000</pubDate>
+            <description><![CDATA[See release notes at https://github.com/giteshkukreja19/DropShelf/releases/tag/v2.1.0]]></description>
+            <enclosure
+                url="https://github.com/giteshkukreja19/DropShelf/releases/download/v2.1.0/DropShelf.dmg"
+                sparkle:edSignature="K3TqkDAzuHL3v6Alje812bBGB9WjmoOGTPIk6gAdH+z8M9vSgFmd0v8M0+VjI3X/Ms5/xGpTeReyogRqXNtRCA==" length="3666048"
+                type="application/octet-stream" />
+        </item>
         <item>
             <title>DropShelf 2.0.0</title>
             <link>https://github.com/giteshkukreja19/DropShelf/releases/tag/v2.0.0</link>

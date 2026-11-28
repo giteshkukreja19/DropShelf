@@ -18,10 +18,40 @@ struct ShelfCustomAction: Codable, Identifiable, Hashable, Sendable {
     var renamePattern: String? = nil
     var ocrOutput: String? = nil
     var enlarge: Bool? = nil
+    var archiveName: String? = nil
+    var stitchColumns: Int? = nil
+    var stitchRows: Int? = nil
+    var stitchGap: Int? = nil
+    var stitchBackground: String? = nil
+    var enhanceImages: Bool? = nil
+    var rotation: Int? = nil
+    var wordMode: String? = nil
+    var archiveBase: String { (archiveName ?? "Archive").trimmingCharacters(in: .whitespacesAndNewlines) }
+    var description: String {
+        switch kind {
+        case "move": return "Move selected files to a predefined folder."
+        case "copy": return "Copy selected files to a predefined folder."
+        case "open": return "Open selected files with your preferred application."
+        case "rename": return "Rename files using a reusable naming pattern."
+        case "ocr": return "Extract text from images to the clipboard or a text file."
+        case "stitch": return "Combine images using a saved grid, spacing and background."
+        case "compress": return "Reduce image size using your preferred JPEG quality."
+        case "resize": return "Fit images within your chosen dimensions, preserving proportions."
+        case "convert": return "Convert images to your preferred format and quality."
+        case "metadata": return "Create copies without embedded image metadata."
+        case "imagePDF": return "Combine images into a PDF with optional clarity enhancement."
+        case "compressPDF": return "Reduce PDF size using a saved raster resolution."
+        case "rotatePDF": return "Rotate every page by a predefined angle."
+        case "pdfWord": return "Convert PDFs using your preferred Word conversion mode."
+        case "zip": return "Combine files into a reusable named ZIP archive."
+        default: return "Save reusable action parameters."
+        }
+    }
     var destination: ShelfOutputDestination { ShelfOutputDestination(rawValue: destinationRaw ?? "") ?? .shelf }
     var folder: URL? { folderPath.map { URL(fileURLWithPath: $0, isDirectory: true) } }
     var valid: Bool {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        if kind == "zip" && (archiveBase.isEmpty || archiveBase.hasPrefix(".") || archiveBase.contains("/") || archiveBase.contains(":") || archiveBase.contains("\u{0}") || archiveBase.utf8.count > 180) { return false }
         if kind == "resize" && (!(1...16000).contains(width) || !(1...16000).contains(height)) { return false }
         if ["move", "copy"].contains(kind) { return folder != nil }
         if kind == "open" { return applicationPath != nil }
@@ -56,7 +86,11 @@ struct ShelfCustomAction: Codable, Identifiable, Hashable, Sendable {
         case "rename": return renamePattern ?? "Name pattern"
         case "ocr": return ocrOutput ?? "Clipboard"
         case "resize": return "Maximum \(width) × \(height) px"
-        case "convert": return "Convert to \(format.uppercased())"
+        case "convert": return "Convert to \(format.uppercased())" + (["jpg", "heic"].contains(format) ? " · \(quality)%" : "")
+        case "zip": return archiveBase
+        case "rotatePDF": return "Rotate \(rotation ?? 90)°"
+        case "stitch": return "\(stitchColumns ?? 1) columns · \(stitchGap ?? 0) px spacing"
+        case "pdfWord": return wordMode ?? "System preference"
         case "compress": return "JPEG quality \(quality)%"
         case "compressPDF": return "PDF resolution \(pdfDPI ?? 120) DPI"
         default: return Self.kinds.first { $0.0 == kind }?.1 ?? kind
@@ -125,14 +159,10 @@ private struct ShelfCustomActionEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(ShelfCustomAction.kinds.first { $0.0 == item.kind }?.1 ?? "Custom Action").font(.system(size: 22, weight: .semibold)).frame(maxWidth: .infinity)
-            Text("Save parameters to run this action directly from your shelf.").font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: .infinity)
+            Text(item.description).font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: .infinity)
             ActionPanelGroup { HStack { Text("Display name"); Spacer(); TextField("Name", text: $item.name).textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing).frame(maxWidth: 240) } }
-            HStack { Text("Action"); Spacer(); ModernSettingsMenu(title: "Action", selection: $item.kind, options: ShelfCustomAction.kinds) }
-            .onChange(of: item.kind) { kind in
-                if ShelfCustomAction.kinds.contains(where: { $0.1 == item.name }) {
-                    item.name = ShelfCustomAction.kinds.first { $0.0 == kind }?.1 ?? item.name
-                }
-            }
+            if !["metadata"].contains(item.kind) {
+            ActionPanelGroup {
             if item.kind == "resize" {
                 HStack { Text("Maximum width"); Spacer(); TextField("Width", value: $item.width, format: .number).textFieldStyle(.plain).padding(7).background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8)).frame(width: 95); Text("px").foregroundStyle(.secondary) }
                 HStack { Text("Maximum height"); Spacer(); TextField("Height", value: $item.height, format: .number).textFieldStyle(.plain).padding(7).background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8)).frame(width: 95); Text("px").foregroundStyle(.secondary) }
@@ -149,7 +179,28 @@ private struct ShelfCustomActionEditor: View {
                 HStack { Text("Resolution"); Spacer(); Text("\(item.pdfDPI ?? 120) DPI") }
                 Slider(value: Binding(get: { Double(item.pdfDPI ?? 120) }, set: { item.pdfDPI = Int($0.rounded()) }), in: 72...200)
             }
-            if item.kind == "resize" { Toggle("Allow enlargement", isOn: Binding(get: { item.enlarge ?? false }, set: { item.enlarge = $0 })).toggleStyle(.switch) }
+            if item.kind == "resize" { Divider(); HStack { Text("Allow enlargement"); Spacer(); Toggle("Allow enlargement", isOn: Binding(get: { item.enlarge ?? false }, set: { item.enlarge = $0 })).labelsHidden().toggleStyle(.switch) } }
+            if item.kind == "zip" {
+                HStack { Text("Archive name"); Spacer(); TextField("Archive", text: Binding(get: { item.archiveName ?? "Archive" }, set: { item.archiveName = $0 })).textFieldStyle(.roundedBorder).frame(maxWidth: 220) }
+            }
+            if item.kind == "stitch" {
+                HStack { Text("Columns"); Spacer(); ModernSettingsMenu(title: "Columns", selection: Binding(get: { item.stitchColumns ?? 1 }, set: { item.stitchColumns = $0 }), options: (1...12).map { ($0, String($0)) }) }
+                Divider()
+                HStack { Text("Rows"); Spacer(); ModernSettingsMenu(title: "Rows", selection: Binding(get: { item.stitchRows ?? 0 }, set: { item.stitchRows = $0 }), options: [(0, "Automatic")] + (1...12).map { ($0, String($0)) }) }
+                Divider()
+                HStack { Text("Spacing"); Spacer(); Text("\(item.stitchGap ?? 0) px") }
+                Slider(value: Binding(get: { Double(item.stitchGap ?? 0) }, set: { item.stitchGap = Int($0.rounded()) }), in: 0...100)
+                HStack { Text("Background"); Spacer(); ModernSettingsMenu(title: "Background", selection: Binding(get: { item.stitchBackground ?? "Transparent" }, set: { item.stitchBackground = $0 }), options: ["Transparent", "White", "Black"].map { ($0, $0) }) }
+            }
+            if ["stitch", "imagePDF"].contains(item.kind) {
+                HStack { Text("Enhance image clarity"); Spacer(); Toggle("Enhance image clarity", isOn: Binding(get: { item.enhanceImages ?? false }, set: { item.enhanceImages = $0 })).labelsHidden().toggleStyle(.switch) }
+            }
+            if item.kind == "rotatePDF" {
+                HStack { Text("Rotation"); Spacer(); ModernSettingsMenu(title: "Rotation", selection: Binding(get: { item.rotation ?? 90 }, set: { item.rotation = $0 }), options: [(90,"90° clockwise"),(180,"180°"),(270,"90° counterclockwise")]) }
+            }
+            if item.kind == "pdfWord" {
+                HStack { Text("Conversion mode"); Spacer(); ModernSettingsMenu(title: "Conversion mode", selection: Binding(get: { item.wordMode ?? "default" }, set: { item.wordMode = $0 == "default" ? nil : $0 }), options: [("default","System preference"),("automatic","Automatic"),("editable","Editable Word"),("appearance","Preserve appearance")]) }
+            }
             if item.kind == "ocr" {
                 HStack { Text("Output"); Spacer(); ModernSettingsMenu(title: "Output", selection: Binding(get: { item.ocrOutput ?? "Clipboard" }, set: { item.ocrOutput = $0 }), options: [("Clipboard", "Clipboard"), ("Text File", "Text File")]) }
             }
@@ -159,12 +210,24 @@ private struct ShelfCustomActionEditor: View {
                 HStack { Text("Application"); Spacer(); Button(item.applicationPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Choose Application…") { chooseApplication() }.buttonStyle(ShelfSmallButton()) }
             } else if ["move", "copy"].contains(item.kind) {
                 folderRow
-            } else if item.kind != "ocr" || item.ocrOutput == "Text File" {
-                HStack { Text("Show output in"); Spacer(); ModernSettingsMenu(title: "Output", selection: Binding(get: { item.destinationRaw ?? ShelfOutputDestination.shelf.rawValue }, set: { item.destinationRaw = $0 }), options: ShelfOutputDestination.allCases.map { ($0.rawValue, $0.rawValue) }) }
-                if item.destination == .folder { folderRow }
             }
-            Text("Outputs are new copies. Move and Rename change the selected originals after confirmation.").font(.caption).foregroundStyle(.secondary)
-            HStack { Button("Cancel", action: cancel).buttonStyle(ShelfGlassButton()).keyboardShortcut(.cancelAction); Spacer(); Button("Save") { save(item) }.buttonStyle(ShelfGlassButton(prominent: true)).keyboardShortcut(.defaultAction).disabled(!item.valid || choosing) }
+            }
+            }
+            if !["rename", "open", "move", "copy"].contains(item.kind) && (item.kind != "ocr" || item.ocrOutput == "Text File") {
+                ActionPanelGroup {
+                HStack { Text("Show output in"); Spacer(); ModernSettingsMenu(title: "Output", selection: Binding(get: { item.destinationRaw ?? ShelfOutputDestination.shelf.rawValue }, set: { item.destinationRaw = $0 }), options: ShelfOutputDestination.allCases.map { ($0.rawValue, $0.rawValue) }) }
+                if item.destination == .folder { Divider(); folderRow }
+                }
+            }
+            if ["move", "rename"].contains(item.kind) {
+                Text("Original files are changed only after confirmation.").font(.caption).foregroundStyle(.secondary)
+            } else if item.kind == "compressPDF" {
+                Text("Rasterizes pages; searchable text, links and forms may be lost. Original files are preserved.").font(.caption).foregroundStyle(.secondary)
+            } else if item.kind != "open" && !(item.kind == "ocr" && item.ocrOutput != "Text File") {
+                Text("Original files are preserved.").font(.caption).foregroundStyle(.secondary)
+            }
+            Divider()
+            HStack { Spacer(); Button("Cancel", action: cancel).keyboardShortcut(.cancelAction); Button("Save") { save(item) }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(!item.valid || choosing) }.buttonStyle(.bordered)
         }.padding(22).frame(width: 470).background(.regularMaterial).disabled(choosing)
     }
 

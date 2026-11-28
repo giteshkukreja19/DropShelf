@@ -156,14 +156,14 @@ doc.save(sys.argv[2])
             .replacingOccurrences(of: ">", with: "&gt;")
     }
 
-    static func convert(_ url: URL, cancelled: () -> Bool) throws -> Data {
+    static func convert(_ url: URL, modeOverride: String? = nil, cancelled: () -> Bool) throws -> Data {
         guard let pdf = PDFDocument(url: url), !pdf.isLocked, pdf.pageCount > 0 else {
             throw PDFToolkit.error("Cannot read PDF or PDF is password protected.")
         }
         let hasText = (0..<pdf.pageCount).allSatisfy { index in
             !(pdf.page(at: index)?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-        let mode = UserDefaults.standard.string(forKey: "pdf.wordMode") ?? "automatic"
+        let mode = modeOverride ?? UserDefaults.standard.string(forKey: "pdf.wordMode") ?? "automatic"
         if mode == "appearance" || (mode == "automatic" && !hasText) {
             return try convertLayout(url, cancelled: cancelled, appearance: true)
         }

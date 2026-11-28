@@ -75,6 +75,7 @@ enum ShelfSummon: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
+    @AppStorage("shelf.monitor.enabled") private var monitoringEnabled = true
     @AppStorage("shelf.intelligentNames") private var intelligentNames = false
     @Environment(\.colorScheme) private var colorScheme
     @State private var showActionPreferences = false
@@ -99,6 +100,14 @@ struct SettingsView: View {
     @AppStorage("shelf.autoParkPosition") private var autoParkPosition = "Top right"
     @AppStorage("shelf.closeOnOutsideClick") private var closeOnOutsideClick: Bool = false
     @AppStorage("SUEnableAutomaticChecks") private var autoCheckUpdates: Bool = true
+    @AppStorage("clipboard.showOnCopy") private var clipboardShowOnCopy = false
+    @AppStorage("keyboardCleaning.enabled") private var keyboardCleaningEnabled = true
+    @AppStorage("recorder.enabled") private var captureStudioPin = false
+    @AppStorage("keyboardCleaning.pin") private var keyboardCleaningPin = false
+    @AppStorage("keyboardCleaning.seconds") private var keyboardCleaningSeconds = 60
+    @AppStorage("clipboard.autoCollect") private var clipboardAutoCollect = false
+    @State private var guide: Bool = false
+    @State private var whatsNew: Bool = false
 
     /// Source of truth is whether our LaunchAgent plist exists in
     /// `~/Library/LaunchAgents/`. Mirrored into local state so the toggle
@@ -110,6 +119,7 @@ struct SettingsView: View {
     @State private var section = "Shelf Activation"
     @State private var hoveredSection: String?
     @AppStorage("shelf.instantActions") private var instantActions = true
+    @State private var sparkCategory = InstantActionCategory.general.rawValue
     @AppStorage("shelf.emailProvider") private var emailProvider = "Gmail"
     @AppStorage("shelf.smartAttach") private var smartAttach = false
     @AppStorage("shelf.smartAttachStatus") private var smartAttachStatus = "Not attempted yet."
@@ -120,8 +130,8 @@ struct SettingsView: View {
     @AppStorage("shelf.showInDock") private var showInDock = false
     @AppStorage("shelf.showInMenuBar") private var showInMenuBar = true
     @AppStorage("shelf.menuBarIconStyle") private var menuBarIconStyle = "Traditional"
-    private let sections = ["Shelf Activation", "Shelf Interaction", "General", "Cloud Sharing", "Custom Actions", "Instant Actions", "Folder Monitoring", "File & Text Tools", "Capture Studio", "About & Updates"]
-    private let symbols = ["cursorarrow", "rectangle.on.rectangle", "gearshape", "cloud", "slider.horizontal.3", "bolt", "folder.badge.plus", "doc.text", "video", "info.circle"]
+    private let sections = ["Shelf Activation", "Shelf Interaction", "General", "Cloud Sharing", "Custom Actions", "Instant Actions", "File & Tools", "Capture Studio", "About & Updates"]
+    private let symbols = ["cursorarrow", "rectangle.on.rectangle", "gearshape", "cloud", "slider.horizontal.3", "bolt", "doc.text", "video", "info.circle"]
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
@@ -162,7 +172,6 @@ struct SettingsView: View {
                                         .blue,
                                         .yellow,
                                         .pink,
-                                        .indigo,
                                         .orange,
                                         .red, .cyan
                                     ][i],
@@ -285,32 +294,102 @@ struct SettingsView: View {
                             settingsGroup("Your presets") { ShelfCustomActionsSettings() }
 
                         case "Instant Actions":
-                            settingsGroup("Sharing shortcuts") {
-                                settingsToggle(
-                                    "Enable Instant Actions",
-                                    isOn: $instantActions
-                                )
-
-                                Divider()
+                            settingsGroup("Spark") {
                                 HStack {
-                                    Label("Email provider", systemImage: "envelope")
+                                    Label("Enable Spark", systemImage: "bolt.fill")
+                                    ShelfSettingsInfo(message: "Hover over the lightning icon below a shelf to reveal up to four selected actions.")
                                     Spacer(minLength: 8)
-                                    ModernSettingsMenu(title: "Email provider", selection: $emailProvider, options: [("Gmail", "Gmail"), ("System Mail", "System Mail")])
+                                    Toggle("Enable Spark", isOn: $instantActions).labelsHidden().toggleStyle(.switch)
                                 }
-                                HStack {
-                                    Text("Sharing help")
-                                    Spacer()
-                                    ShelfSettingsInfo(message: "The lightning button appears near a shelf. Drop files onto supported destinations. Original files are preserved. Gmail opens a draft; attach files manually. System Mail uses native sharing when available.")
+                                if instantActions {
+                                    Divider()
+                                    HStack(spacing: 3) {
+                                        ForEach(InstantActionCategory.allCases, id: \.rawValue) { category in
+                                            let selected = sparkCategory == category.rawValue
+                                            Button {
+                                                sparkCategory = category.rawValue
+                                            } label: {
+                                                Text(category.rawValue)
+                                                    .font(.system(.body, weight: selected ? .semibold : .regular))
+                                                    .foregroundStyle(selected ? Color.primary : Color.secondary)
+                                                    .frame(maxWidth: .infinity)
+                                                    .padding(.vertical, 6)
+                                                    .background {
+                                                        if selected {
+                                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                                .fill(Color.primary.opacity(0.10))
+                                                        }
+                                                    }
+                                                    .contentShape(Rectangle())
+                                            }
+                                            .buttonStyle(.plain)
+                                            .accessibilityAddTraits(selected ? .isSelected : [])
+                                        }
+                                    }
+                                    .padding(3)
+                                    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                    .accessibilityLabel("Action category")
+                                    let category = InstantActionCategory(rawValue: sparkCategory) ?? .general
+                                    InstantActionPreferenceGroup(category: category).id(category.rawValue)
+                                }
+                            }
+                            if instantActions {
+                                settingsGroup("Email configuration") {
+                                    HStack {
+                                        Label("Email provider", systemImage: "envelope")
+                                        Spacer(minLength: 8)
+                                        ModernSettingsMenu(title: "Email provider", selection: $emailProvider, options: [("Gmail", "Gmail"), ("System Mail", "System Mail")])
+                                    }
+                                    if emailProvider == "Gmail" {
+                                        Divider()
+                                        HStack {
+                                            Text("Smart Attach in Gmail")
+                                            ShelfSettingsInfo(message: "Experimental browser accessibility attachment for one local file. Never sends email. If verification fails, attach manually.")
+                                            Spacer(minLength: 8)
+                                            Toggle("Smart Attach in Gmail", isOn: $smartAttach).labelsHidden().toggleStyle(.switch)
+                                        }
+                                        if smartAttach {
+                                            HStack {
+                                                Text("Accessibility permission"); Spacer()
+                                                Button("Allow…") { ShelfSmartAttach.requestPermission() }
+                                                Button("Check") { ShelfSmartAttach.report(ShelfSmartAttach.permissionGranted() ? "Accessibility granted. Click Mail on a single local file to test." : "Accessibility not granted. Enable DropShelf in Privacy & Security → Accessibility.") }
+                                            }
+                                            Text(smartAttachStatus).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                        }
+                                    }
                                 }
                             }
 
-                        case "Folder Monitoring":
-                            settingsGroup("Monitored folders") { ShelfAutomationSettings(monitoring: true) }
+                            settingsGroup("Keyboard Cleaning") {
+                                settingsToggle("Enable Keyboard Cleaning", isOn: $keyboardCleaningEnabled)
+                                    .onChange(of: keyboardCleaningEnabled) { enabled in
+                                        if !enabled { KeyboardCleaningController.shared.disable() }
+                                        (NSApp.delegate as? AppDelegate)?.refreshKeyboardCleaningPin()
+                                    }
+                                if keyboardCleaningEnabled {
+                                    Divider()
+                                    HStack { Label("Keyboard Cleaning Mode", systemImage: "keyboard"); Spacer(); Button("Open…") { (NSApp.delegate as? AppDelegate)?.openKeyboardCleaning() } }
+                                    Divider()
+                                    HStack { choice("Auto unlock after", selection: $keyboardCleaningSeconds, options: [(30, "30 seconds"), (60, "60 seconds"), (120, "2 minutes"), (300, "5 minutes"), (0, "Manual unlock")])
+                                    ShelfSettingsInfo(message: "Mouse and trackpad remain active. Manual mode has a 15-minute safety limit. Menu visibility and shortcuts are in General.") }
+                                }
+                            }
 
                         case "Capture Studio":
                             ShelfRecorderSettings()
 
-                        case "File & Text Tools":
+                        case "File & Tools":
+                            settingsGroup("Folder Monitoring") {
+                                HStack {
+                                    settingsToggle("Enable Folder Monitoring", isOn: $monitoringEnabled)
+                                        .onChange(of: monitoringEnabled) { _ in (NSApp.delegate as? AppDelegate)?.restartFolderMonitoring() }
+                                    ShelfSettingsInfo(message: "Collect new files from selected folders. Turning this off preserves rules and stops new monitoring work. An organization operation already in progress may finish.")
+                                }
+                                if monitoringEnabled {
+                                    Divider()
+                                    ShelfAutomationSettings(monitoring: true)
+                                }
+                            }
                             pdfSettings
 
                         default:
@@ -355,10 +434,9 @@ struct SettingsView: View {
         case "General": return "Manage storage, language and startup preferences."
         case "Cloud Sharing": return "Manage your existing cloud folder workflow."
         case "Custom Actions": return "Save frequently used image and document action parameters."
-        case "Instant Actions": return "Quickly share items directly from a shelf."
-        case "Folder Monitoring": return "Collect new files from selected folders."
+        case "Instant Actions": return "Configure quick sharing, image shortcuts and keyboard cleaning."
         case "Capture Studio": return "Record your screen and save videos locally."
-        case "File & Text Tools": return "Configure document conversion preferences."
+        case "File & Tools": return "Manage file tools and folder automation."
         default: return "Manage DropShelf update preferences."
         }
     }
@@ -413,36 +491,41 @@ struct SettingsView: View {
             choice("Default file sorting", selection: $sortOrder, options: ["Date Added", "Name", "Size"].map { ($0, $0) })
             Divider()
             HStack { Text("Compact shelf size"); Spacer(); Text("\(compactSizePercent)%").monospacedDigit() }
-            Slider(value: Binding(get: { Double(compactSizePercent) }, set: { compactSizePercent = Int($0) }), in: 90...150)
-            HStack { note("Compact shelves keep this size."); Spacer(); Button("Reset") { compactSizePercent = 100 } }
+            HStack(spacing: 10) {
+                Slider(value: Binding(get: { Double(compactSizePercent) }, set: { compactSizePercent = Int($0) }), in: 90...150).frame(maxWidth: 300)
+                Spacer(minLength: 8)
+                Button("Reset") { compactSizePercent = 100 }
+            }
             Divider()
             HStack { Text("Expanded shelf size"); Spacer(); Text("\(expandedSizePercent)%").monospacedDigit() }
-            Slider(value: Binding(get: { Double(expandedSizePercent) }, set: {
-                fixedExpandedDimensions = ""
-                expandedSizePercent = Int($0.rounded())
-            }), in: 70...150)
-            HStack {
-                HStack { Spacer(); ShelfSettingsInfo(message: "Controls width and adaptive maximum height. Reset restores the compact v1.7.0 layout and clears any saved fixed dimensions.") }
-                Spacer()
+            HStack(spacing: 10) {
+                Slider(value: Binding(get: { Double(expandedSizePercent) }, set: {
+                    fixedExpandedDimensions = ""
+                    expandedSizePercent = Int($0.rounded())
+                }), in: 70...150).frame(maxWidth: 300)
+                Spacer(minLength: 8)
                 Button("Reset") { fixedExpandedDimensions = ""; expandedSizePercent = 100 }
+                ShelfSettingsInfo(message: "Controls width and adaptive maximum height. Reset clears saved fixed dimensions.")
             }
-            settingsToggle("Keep expanded shelf size fixed", isOn: Binding(
-                get: { fixedExpandedSize },
-                set: { enabled in
-                    if enabled && !fixedExpandedSize {
-                        fixedExpandedDimensions = (NSApp.delegate as? AppDelegate)?.currentExpandedShelfDimensions() ?? ""
+            HStack {
+                settingsToggle("Keep expanded shelf size fixed", isOn: Binding(
+                    get: { fixedExpandedSize },
+                    set: { enabled in
+                        if enabled && !fixedExpandedSize {
+                            fixedExpandedDimensions = (NSApp.delegate as? AppDelegate)?.currentExpandedShelfDimensions() ?? ""
+                        }
+                        fixedExpandedSize = enabled
                     }
-                    fixedExpandedSize = enabled
-                }
-            ))
+                ))
+                ShelfSettingsInfo(message: "Save the current expanded window size. Resize manually to remember a new size, or use the slider preset. Overflow scrolls inside the shelf.")
+            }
             if fixedExpandedSize, let size = ShelfExpandedGeometry.decode(fixedExpandedDimensions) {
                 HStack {
-                    HStack { Spacer(); ShelfSettingsInfo(message: "Saved window size: \(Int(size.width)) × \(Int(size.height)) pt") }
+                    Text("\(Int(size.width)) × \(Int(size.height)) pt").foregroundStyle(.secondary)
                     Spacer()
                     Button("Use slider size") { fixedExpandedDimensions = "" }
-                }
+                    }
             }
-            HStack { Spacer(); ShelfSettingsInfo(message: "When enabled, the current expanded window size is saved. If no expanded shelf is visible, a compact preset is used. Resize manually to remember a new size, or use the slider to choose a preset. Overflow scrolls inside the shelf.") }
             Divider()
             HStack { choice("Expand existing shelf", selection: $activation, options: ShelfActivation.allCases.map { ($0, $0.label) }); ShelfSettingsInfo(message: "Double-click the file stack to expand, or drag files directly from it.") }
         }
@@ -459,9 +542,10 @@ struct SettingsView: View {
             settingsToggle("Automatically dock at the right screen edge", isOn: $edgeDock)
             Divider()
             settingsToggle("Automatically move shelf after first drop", isOn: $autoParkTopRight)
-            choice("Move shelf to", selection: $autoParkPosition, options: ShelfScreenPosition.allCases.map { ($0.rawValue, $0.rawValue) })
-                .disabled(!autoParkTopRight)
-            HStack { Spacer(); ShelfSettingsInfo(message: "Glide to the selected position on the current display after the first file is added. Existing shelves stay in place.") }
+            HStack {
+                choice("Move shelf to", selection: $autoParkPosition, options: ShelfScreenPosition.allCases.map { ($0.rawValue, $0.rawValue) }).disabled(!autoParkTopRight)
+                ShelfSettingsInfo(message: "Glide to the selected position on the current display after the first file is added. Existing shelves stay in place.")
+            }
             Divider()
             HStack { settingsToggle(L("Collapse expanded shelf when clicking outside"), isOn: $closeOnOutsideClick); ShelfSettingsInfo(message: L("settings.collapse.description")) }
         }
@@ -477,17 +561,29 @@ struct SettingsView: View {
         }
         settingsGroup("Action menu") {
             HStack { Text("Customize action menu"); Spacer(); Button("Edit…") { showActionPreferences = true } }
-            HStack { Spacer(); ShelfSettingsInfo(message: "Choose which actions appear in the main menu or submenu.") }
         }.sheet(isPresented: $showActionPreferences) { ShelfActionPreferencesView() }
         settingsGroup("Keyboard shortcuts") {
             HStack { Text("Customize keyboard shortcuts"); Spacer(); Button("Edit…") { showShortcuts = true } }
         }.sheet(isPresented: $showShortcuts) { ShelfShortcutSettings() }
+        settingsGroup("DropShelf menu") {
+            if keyboardCleaningEnabled {
+                HStack { settingsToggle("Show Keyboard Cleaning", isOn: $keyboardCleaningPin)
+                    .onChange(of: keyboardCleaningPin) { _ in (NSApp.delegate as? AppDelegate)?.refreshKeyboardCleaningPin() } }
+            }
+            if #available(macOS 15.0, *) {
+                if keyboardCleaningEnabled { Divider() }
+                HStack { settingsToggle("Show Capture Studio", isOn: $captureStudioPin)
+                    .onChange(of: captureStudioPin) { _ in (NSApp.delegate as? AppDelegate)?.refreshKeyboardCleaningPin() } }
+            }
+
+        }
         settingsGroup("Application appearance") {
-            settingsToggle("Show in menu bar", isOn: Binding(get: { showInMenuBar }, set: { value in
+            HStack { settingsToggle("Show in menu bar", isOn: Binding(get: { showInMenuBar }, set: { value in
                 showInMenuBar = value
                 (NSApp.delegate as? AppDelegate)?.applyGeneralAppearance()
             })).disabled(!showInDock)
-            HStack { Spacer(); ShelfSettingsInfo(message: "Keep the menu bar enabled when the Dock icon is hidden.") }
+                ShelfSettingsInfo(message: "Keep the menu bar enabled when the Dock icon is hidden.")
+            }
             Divider()
             choice("Menu bar icon", selection: $menuBarIconStyle, options: ["Traditional", "Stack", "Filled"].map { ($0, $0) })
                 .onChange(of: menuBarIconStyle) { _ in (NSApp.delegate as? AppDelegate)?.applyGeneralAppearance() }
@@ -502,15 +598,16 @@ struct SettingsView: View {
         }
         settingsGroup("Favourite items") { ShelfFavouriteSettings() }
         settingsGroup("Favourite locations") { ShelfAutomationSettings(monitoring: false) }
+        settingsGroup("Clipboard Shelf") {
+            HStack { settingsToggle("Copy to Shelf (⌘C)", isOn: $clipboardAutoCollect); ShelfSettingsInfo(message: "Supported clipboard changes are saved locally. Turn off for sensitive work; some apps do not mark confidential clipboard contents. OCR text is saved even when this is off. Items follow Auto-delete shelves individually.") }
+            if clipboardAutoCollect {
+                Divider()
+                settingsToggle("Show shelf when copying", isOn: $clipboardShowOnCopy)
+            }
+        }
         settingsGroup("Storage and preferences") {
             VStack(alignment: .leading, spacing: 6) {
-                choice(L("Auto-delete shelves"), selection: $expiryDays, options: ShelfExpiry.allCases.map { ($0.rawValue, $0.label) })
-                .id(pickedLanguage)
-
-                Text(L("settings.expiry.description"))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack { choice(L("Auto-delete shelves"), selection: $expiryDays, options: ShelfExpiry.allCases.map { ($0.rawValue, $0.label) }).id(pickedLanguage); ShelfSettingsInfo(message: L("settings.expiry.description")) }
             }
 
             Divider()
@@ -523,7 +620,7 @@ struct SettingsView: View {
                 // .onChange is unreliable here — when the surrounding view
                 // gets re-identified by a peer Picker's .id(), the handler
                 // can be discarded before it runs.
-                choice(L("Language"), selection: Binding(
+                HStack { choice(L("Language"), selection: Binding(
                     get: { pickedLanguage },
                     set: { newValue in
                         pickedLanguage = newValue
@@ -531,24 +628,18 @@ struct SettingsView: View {
                     }
                 ), options: AppLanguage.allCases.map { ($0, $0.displayName) })
 
-                Text(L("settings.language.description"))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                 }
             }
 
             Divider()
 
             VStack(alignment: .leading, spacing: 6) {
-                settingsToggle(L("Launch at login"), isOn: Binding(
+                HStack { settingsToggle(L("Launch at login"), isOn: Binding(
                     get: { launchAtLogin },
                     set: { newValue in applyLaunchAtLogin(newValue) }
                 ))
                 .toggleStyle(.switch)
-                Text(L("settings.launch.description"))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                 }
             }
 
 
@@ -563,24 +654,23 @@ struct SettingsView: View {
             }
         }
         settingsGroup("Document conversion") {
-            choice("PDF to Word mode", selection: $pdfWordMode, options: [("automatic", "Automatic"), ("editable", "Editable Word"), ("appearance", "Preserve appearance")])
-            Text("Automatic uses editable layout for text PDFs and preserves page images for scanned or mixed PDFs. Preserve appearance keeps fonts, borders and graphics visually but is not editable. Editable Word uses OCR for scans; complex formatting may be lost.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack { choice("PDF to Word mode", selection: $pdfWordMode, options: [("automatic", "Automatic"), ("editable", "Editable Word"), ("appearance", "Preserve appearance")])
+            ShelfSettingsInfo(message: "Automatic uses editable layout for text PDFs and preserves page images for scanned or mixed PDFs. Preserve appearance keeps fonts, borders and graphics visually but is not editable. Editable Word uses OCR for scans; complex formatting may be lost.") }
 
         }
     }
     @ViewBuilder private var updateSettings: some View {
+        settingsGroup("About DropShelf") {
+            HStack { Text("Version " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development")); Spacer(); Button("Check for Updates") { (NSApp.delegate as? AppDelegate)?.checkForUpdatesFromSettings() } }
+            Divider()
+            HStack { Label("Quick Guide", systemImage: "book"); Spacer(); Button("Open…") { whatsNew = false; guide = true } }
+            HStack { Label("What's New", systemImage: "sparkles"); Spacer(); Button("View…") { whatsNew = true; guide = true } }
+        }.sheet(isPresented: $guide) { ShelfQuickGuideView(whatsNew: whatsNew) }
         settingsGroup("Software updates") {
             VStack(alignment: .leading, spacing: 6) {
-                Text(L("Updates"))
-                    .font(.system(size: 13, weight: .medium))
-                settingsToggle(L("Automatically check for updates"), isOn: $autoCheckUpdates)
+                HStack { settingsToggle(L("Automatically check for updates"), isOn: $autoCheckUpdates)
                     .toggleStyle(.switch)
-                Text(L("settings.updates.description"))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                 }
             }
         }
     }
@@ -769,8 +859,14 @@ private struct ShelfSettingsContentMaterial: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     var body: some View {
-        (colorScheme == .dark ? Color(white: 0.125) : Color(nsColor: .windowBackgroundColor))
-            .opacity(reduceTransparency ? 1 : (colorScheme == .dark ? 0.92 : 0.94))
+        if reduceTransparency {
+            Color(nsColor: .windowBackgroundColor)
+        } else {
+            ZStack {
+                ShelfSettingsSidebarMaterial(material: .windowBackground)
+                if colorScheme == .dark { Color.black.opacity(0.14) }
+            }
+        }
     }
 }
 
@@ -778,20 +874,24 @@ private struct ShelfAdaptiveSettingsSidebar: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     var body: some View {
-        (colorScheme == .dark ? Color(white: 0.16) : Color(nsColor: .windowBackgroundColor))
-            .opacity(reduceTransparency ? 1 : 0)
+        ZStack {
+            ShelfSettingsSidebarMaterial(material: .sidebar)
+            Color(nsColor: .windowBackgroundColor).opacity(reduceTransparency ? 1 : 0.08)
+            if !reduceTransparency && colorScheme == .dark { Color.black.opacity(0.08) }
+        }
     }
 }
 
 private struct ShelfSettingsSidebarMaterial: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .sidebar
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
-        view.material = .sidebar
+        view.material = material
         view.blendingMode = .behindWindow
         view.state = .followsWindowActiveState
         return view
     }
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) { nsView.material = material }
 }
 
 private struct ShelfDataLocationSettings: View {

@@ -31,8 +31,8 @@ BUNDLE_ID="com.boski.dropshelf"
 # VERSION drives both CFBundleShortVersionString and CFBundleVersion so the
 # value Sparkle compares (sparkle:version vs CFBundleVersion) lines up with
 # the same dotted form we publish in appcast.xml.
-VERSION="2.1.0"
-BUILD_VERSION="2.1.10"
+VERSION="2.2.16"
+BUILD_VERSION="2.2.16"
 MIN_OS="13.0"
 
 APP_DIR="dist/${APP_NAME}.app"
@@ -134,5 +134,9 @@ codesign --force --deep --sign - "${SPARKLE_FX}"
 codesign --force --deep --sign - "${APP_DIR}"
 codesign --verify --deep --strict --verbose=2 "${APP_DIR}"
 
+if [[ "${DROPSHELF_APP_ONLY:-0}" == "1" ]]; then
+  echo "Preview app built (no DMG)."
+  exit 0
+fi
 echo "==> Building release DMG"
 python3 scripts/build-release-installer.py "$APP_DIR" "$DMG_PATH"

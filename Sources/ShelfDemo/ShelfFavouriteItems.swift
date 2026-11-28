@@ -104,11 +104,10 @@ struct ShelfFavouriteSettings: View {
     @AppStorage("favouriteItems.menuBar") private var menuBar = true
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack { Text("Enable Favourite Items"); Spacer(); Toggle("Enable Favourite Items", isOn: $enabled).labelsHidden().toggleStyle(.switch) }
+            HStack { Text("Enable Favourite Items"); Spacer(); Toggle("Enable Favourite Items", isOn: $enabled).labelsHidden().toggleStyle(.switch); ShelfSettingsInfo(message: "Right-click a shelf item to add it. Disabling this feature keeps your saved favourites.") }
             if enabled {
                 Divider()
                 HStack { Text("Show Favourites in menu bar"); Spacer(); Toggle("Show Favourites in menu bar", isOn: $menuBar).labelsHidden().toggleStyle(.switch) }
-                Text("Right-click a shelf item to add it. Disabling this feature keeps your saved favourites.").font(.caption).foregroundStyle(.secondary)
             }
         }
     }

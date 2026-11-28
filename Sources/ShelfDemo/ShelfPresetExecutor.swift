@@ -62,7 +62,7 @@ import Foundation
                     }
                     if preset.kind == "zip" {
                         let folder = try preset.destination.directory(chosen: preset.folder)
-                        let output = UniqueDestination.url(preferred: folder.appendingPathComponent("Archive.zip"))
+                        let output = UniqueDestination.url(preferred: folder.appendingPathComponent(preset.archiveBase.lowercased().hasSuffix(".zip") ? preset.archiveBase : preset.archiveBase + ".zip"))
                         try ShelfArchiveAction.build(urls: urls, destination: output)
                         return ([output], nil, [])
                     }

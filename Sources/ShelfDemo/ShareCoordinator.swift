@@ -113,7 +113,7 @@ final class ShareCoordinator: NSObject, NSSharingServicePickerDelegate, NSSharin
         DragInitiatorView.preserveShelfForCurrentDrag()
         let enabled = UserDefaults.standard.bool(forKey: "shelf.smartAttach")
         if !enabled {
-            ShelfSmartAttach.report("Smart Attach is disabled. Attach manually.")
+            ShelfSmartAttach.report("Smart Attach is disabled. Attach manually or enable it in Settings → Instant Actions.")
         } else if files.count == 1 {
             ShelfSmartAttach.start(file: files[0], origin: origin)
         } else if files.isEmpty {

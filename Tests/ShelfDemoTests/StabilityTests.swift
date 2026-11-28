@@ -2,6 +2,23 @@ import XCTest
 @testable import ShelfDemo
 
 final class StabilityTests: XCTestCase {
+    func testRetentionRefreshPreservesIdentityAndMetadata() {
+        let original = ShelfItem(type: .text, textContent: "Hello", createdAt: Date(timeIntervalSince1970: 10), translation: ShelfOCRMetadata(original: "Hallo", source: "de", target: "en"))
+        let date = Date(timeIntervalSince1970: 20)
+        let refreshed = original.refreshingRetention(at: date)
+        XCTAssertEqual(refreshed.id, original.id)
+        XCTAssertEqual(refreshed.textContent, original.textContent)
+        XCTAssertEqual(refreshed.translation, original.translation)
+        XCTAssertEqual(refreshed.createdAt, date)
+    }
+    func testTranslationChunkBoundAndLosslessInput() {
+        let text = String(repeating: "Hello world. नमस्ते। 日本語。 ", count: 400)
+        let chunks = OCRTextPreparation.translationChunks(text, limit: 100)
+        XCTAssertTrue(chunks.allSatisfy { !$0.isEmpty && $0.count <= 100 })
+        XCTAssertEqual(chunks.joined(), text)
+        XCTAssertEqual(OCRTextPreparation.translationChunks(""), [])
+        XCTAssertEqual(OCRTextPreparation.translationChunks("abc", limit: 0), ["a", "b", "c"])
+    }
     func testFitPreservesAspectAndBounds() {
         XCTAssertEqual(ShelfPixelSize(width: 1920, height: 1080).fitted(maxWidth: 500, maxHeight: 500), ShelfPixelSize(width: 500, height: 281))
         XCTAssertEqual(ShelfPixelSize(width: 1080, height: 1920).fitted(maxWidth: 500, maxHeight: 500), ShelfPixelSize(width: 281, height: 500))

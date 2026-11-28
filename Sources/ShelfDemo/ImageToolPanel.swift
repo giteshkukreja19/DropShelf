@@ -15,6 +15,8 @@ struct ImageToolPanel: View {
     @State private var width = "500"
     @State private var height = "500"
     @State private var quality = 0.75
+    @State private var enhance = false
+    @State private var exportQuality = 1.0
     @State private var format = "png"
     @State private var destination: ShelfOutputDestination = .shelf
     @State private var allowEnlargement = false
@@ -90,6 +92,17 @@ struct ImageToolPanel: View {
                             }
                         } else {
                             Label("Create a copy without the original embedded metadata.", systemImage: "tag.slash")
+                        }
+                    }
+                    if action != .metadata {
+                        ActionPanelGroup {
+                            Toggle("Enhance image clarity", isOn: $enhance).toggleStyle(.switch)
+                            Text("Local sharpening. Does not restore lost detail.").font(.caption).foregroundStyle(.secondary)
+                            if action == .resize || (action == .convertImage && ["jpg", "heic"].contains(format)) {
+                                HStack { Text("Export quality"); Spacer(); Text("\(Int(exportQuality * 100))%").monospacedDigit() }
+                                Slider(value: $exportQuality, in: 0.1...1)
+                            }
+                            if action == .convertImage && ["png", "tiff"].contains(format) { Text("Lossless output; compression quality is not applicable.").font(.caption).foregroundStyle(.secondary) }
                         }
                     }
                     ActionPanelGroup {
@@ -176,7 +189,8 @@ struct ImageToolPanel: View {
         let w = Int(width.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 500
         let h = Int(height.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 500
         let q = quality, f = format, enlarge = allowEnlargement
-        let presetQuality = preset == nil ? 1.0 : q
+        let presetQuality = preset == nil ? exportQuality : q
+        let sharpen = enhance, resizeQuality = exportQuality
         let target = destination, chosenFolder = outputFolder
         Task { @MainActor in
             let result = await Task.detached(priority: .userInitiated) { () -> (outputs: [URL], errors: [String], cancelled: Bool) in
@@ -189,9 +203,9 @@ struct ImageToolPanel: View {
                         do {
                             let output: URL = try autoreleasepool {
                                 switch a {
-                                case .resize: return try ImageActions.resize(url: url, width: w, height: h, allowEnlargement: enlarge, folder: folder)
-                                case .compress: return try ImageActions.compress(url: url, quality: q, folder: folder)
-                                case .convertImage: return try ImageActions.convert(url: url, format: f, folder: folder, quality: presetQuality)
+                                case .resize: return try ImageActions.resize(url: url, width: w, height: h, allowEnlargement: enlarge, folder: folder, enhance: sharpen, quality: resizeQuality)
+                                case .compress: return try ImageActions.compress(url: url, quality: q, folder: folder, enhance: sharpen)
+                                case .convertImage: return try ImageActions.convert(url: url, format: f, folder: folder, quality: presetQuality, enhance: sharpen)
                                 default: return try ImageActions.removeMetadata(url: url, folder: folder)
                                 }
                             }

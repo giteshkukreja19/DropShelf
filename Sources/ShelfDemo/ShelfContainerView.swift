@@ -198,6 +198,18 @@ struct ShelfContainerView: View {
                 if let url = item.fileURL { return url }
                 return item.textContent
             }
+        }, tool: { action in
+            let urls = SmartFileActions.files(items)
+            guard urls.count == items.count, !urls.isEmpty else { return }
+            if action == .enhance {
+                guard ShelfPhaseOneActions.options(urls).contains("Enhance Image Quality…") else { return }
+                ShelfPhaseOneActions.run("phase1:Enhance Image Quality…", urls: urls, manager: manager, shelfID: shelfID)
+            } else {
+                let selected: SmartFileActions.Action = action == .mergePDF ? .mergePDF : .compressPDF
+                guard SmartFileActions.options(urls).contains(selected) else { return }
+                let entry = NSMenuItem(); entry.representedObject = selected.rawValue
+                SmartFileActions.run(entry, items: items, manager: manager, shelfID: shelfID)
+            }
         }))
         .onHover { inside in
             shelfHovered = inside
@@ -419,7 +431,7 @@ struct ShelfContainerView: View {
                   let measured = toolMeasuredHeight, let previous = toolOpeningFrame else { return }
             let screen = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? window.frame
             let height = min(max(200, measured), max(200, screen.height - 16))
-            guard abs(previous.height - height) > 2 else { return }
+            guard height > previous.height + 8 else { return }
             let current = window.frame
             if var saved = savedShelfFrame {
                 saved.origin.x += current.midX - previous.midX
@@ -430,7 +442,8 @@ struct ShelfContainerView: View {
             next.size.height = height
             next.origin.y = max(screen.minY + 8, min(current.maxY - height, screen.maxY - height - 8))
             toolOpeningFrame = next
-            animateToolWindow(window, to: next)
+            // Avoid animation feedback from intermediate geometry measurements.
+            window.setFrame(next, display: true)
         }
     }
 
@@ -795,20 +808,20 @@ private struct ExpandedShelfView: View {
             // pasteboard. Empty selection is a no-op so we don't accidentally
             // clobber the user's clipboard.
             guard id == shelfID else { return }
-            let urls: [URL]
+            let objects: [NSPasteboardWriting]
             if inFolder {
-                urls = currentEntries
-                    .filter { folderSelection.contains($0.id) }
-                    .map(\.url)
+                objects = currentEntries.filter { folderSelection.contains($0.id) }.map { $0.url as NSURL }
             } else {
-                urls = items
-                    .filter { selection.contains($0.id) }
-                    .compactMap(\.fileURL)
+                objects = items.filter { selection.contains($0.id) }.compactMap { item -> NSPasteboardWriting? in
+                    if let text = item.textContent { return text as NSString }
+                    if let url = item.fileURL { return url as NSURL }
+                    return nil
+                }
             }
-            guard !urls.isEmpty else { return }
+            guard !objects.isEmpty else { return }
             let pb = NSPasteboard.general
             pb.clearContents()
-            pb.writeObjects(urls.map { $0 as NSURL })
+            pb.writeObjects(objects)
         }
     }
 

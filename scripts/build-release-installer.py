@@ -10,11 +10,11 @@ def main():
     if sys.platform != 'darwin': raise RuntimeError('macOS required')
     app=Path(sys.argv[1]).resolve()
     with (app/'Contents/Info.plist').open('rb') as f: info=plistlib.load(f)
-    if info.get('CFBundleIdentifier')!='com.boski.dropshelf' or info.get('CFBundleShortVersionString')!='2.1.0': raise RuntimeError('Expected official 2.1.0 app')
+    if info.get('CFBundleIdentifier')!='com.boski.dropshelf' or info.get('CFBundleShortVersionString')!='2.2.10': raise RuntimeError('Expected local 2.2.10 app')
     run('codesign','--verify','--deep','--strict',app)
     out=Path(sys.argv[2]).resolve()
     out.parent.mkdir(parents=True,exist_ok=True)
-    vol='DropShelf 2.1.0'
+    vol='DropShelf 2.2.10'
     if (Path('/Volumes')/vol).exists(): raise RuntimeError('Eject the existing installer preview first.')
     with tempfile.TemporaryDirectory(prefix='installer-',dir=out.parent) as tmp:
         work=Path(tmp); rw=work/'layout.dmg'; candidate=work/'final.dmg'; stage=work/'contents'; stage.mkdir()
@@ -31,7 +31,7 @@ def main():
         try:
             if mount.name!=vol: raise RuntimeError('Unexpected volume name')
             run('osascript','-e','''tell application "Finder"
-    tell disk "DropShelf 2.1.0"
+    tell disk "DropShelf 2.2.10"
         open
         set current view of container window to icon view
         set toolbar visible of container window to false
@@ -42,8 +42,8 @@ def main():
         set icon size of opts to 88
         set text size of opts to 13
         set background picture of opts to file ".background:installer.png"
-        set position of item "DropShelf.app" of container window to {176, 224}
-        set position of item "Applications" of container window to {464, 209}
+        set position of item "DropShelf.app" of container window to {176, 215}
+        set position of item "Applications" of container window to {464, 215}
         update without registering applications
         delay 2
         close container window

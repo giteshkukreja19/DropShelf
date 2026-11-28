@@ -1,3 +1,4 @@
+import CoreImage
 import Foundation
 import CoreGraphics
 import ImageIO
@@ -63,6 +64,29 @@ enum ImageActions {
         return try normalizedImage(source, target: size)
     }
 
+    /// Conservative local sharpening; no invented detail or pixel enlargement.
+    static func enhanced(_ image: CGImage, enabled: Bool, strength: Double = 0.45) throws -> CGImage {
+        guard enabled, strength > 0 else { return image }
+        guard ShelfPixelSize(width: image.width, height: image.height).isSafeToRender else { throw error("Image exceeds enhancement size limit.") }
+        let input = CIImage(cgImage: image)
+        let result = input.clampedToExtent().applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: max(0, min(1, strength))]).cropped(to: input.extent)
+        guard let output = CIContext().createCGImage(result, from: input.extent) else { throw error("Unable to enhance image.") }
+        return output
+    }
+
+    static func enhance(url: URL, format: String, quality: Double, folder: URL, strength: Double = 0.45) throws -> URL {
+        let source = try open(url)
+        let type: UTType
+        if format == "original" { type = originalFormat(source, url: url) }
+        else if let selected = UTType(filenameExtension: format), [.png, .jpeg, .heic, .tiff].contains(selected) { type = selected }
+        else { throw error("Unsupported output format.") }
+        return try write(try enhanced(fullImage(url), enabled: true, strength: strength), source: url, suffix: " (enhanced)", type: type, folder: folder, properties: encodingProperties(type, quality))
+    }
+
+    static func encodingProperties(_ type: UTType, _ quality: Double) -> [CFString: Any]? {
+        [.jpeg, .heic].contains(type) ? [kCGImageDestinationLossyCompressionQuality: max(0.1, min(1, quality))] : nil
+    }
+
     private static func originalFormat(_ source: CGImageSource, url: URL) -> UTType {
         guard let identifier = CGImageSourceGetType(source), let type = UTType(identifier as String),
               (CGImageDestinationCopyTypeIdentifiers() as? [String] ?? []).contains(type.identifier),
@@ -70,26 +94,27 @@ enum ImageActions {
         return type
     }
 
-    static func resize(url: URL, width: Int, height: Int, allowEnlargement: Bool = false, folder: URL) throws -> URL {
+    static func resize(url: URL, width: Int, height: Int, allowEnlargement: Bool = false, folder: URL, enhance: Bool = false, quality: Double = 1) throws -> URL {
         let source = try open(url)
         guard let size = orientedSize(of: source),
               let target = size.fitted(maxWidth: width, maxHeight: height, allowEnlargement: allowEnlargement) else {
             throw error("Enter dimensions between 1 and 16000 pixels.")
         }
-        let image = try normalizedImage(source, target: target)
-        return try write(image, source: url, suffix: " (resized)", type: originalFormat(source, url: url), folder: folder)
+        let image = try enhanced(normalizedImage(source, target: target), enabled: enhance)
+        let type = originalFormat(source, url: url)
+        return try write(image, source: url, suffix: " (resized)", type: type, folder: folder, properties: encodingProperties(type, quality))
     }
 
-    static func convert(url: URL, format: String, folder: URL, quality: Double = 1) throws -> URL {
+    static func convert(url: URL, format: String, folder: URL, quality: Double = 1, enhance: Bool = false) throws -> URL {
         guard let type = UTType(filenameExtension: format), [.png, .jpeg, .heic, .tiff].contains(type) else {
             throw error("Unsupported output format.")
         }
-        return try write(fullImage(url), source: url, suffix: " (converted)", type: type, folder: folder, properties: [.jpeg, .heic].contains(type) ? [kCGImageDestinationLossyCompressionQuality: max(0.1, min(1, quality))] : nil)
+        return try write(enhanced(fullImage(url), enabled: enhance), source: url, suffix: " (converted)", type: type, folder: folder, properties: [.jpeg, .heic].contains(type) ? [kCGImageDestinationLossyCompressionQuality: max(0.1, min(1, quality))] : nil)
     }
 
-    static func compress(url: URL, quality: Double, folder: URL) throws -> URL {
+    static func compress(url: URL, quality: Double, folder: URL, enhance: Bool = false) throws -> URL {
         guard quality.isFinite, (0.1...1).contains(quality) else { throw error("Invalid JPEG quality.") }
-        let image = try fullImage(url)
+        let image = try enhanced(fullImage(url), enabled: enhance)
         return try write(image, source: url, suffix: " (compressed)", type: .jpeg, folder: folder,
                          properties: [kCGImageDestinationLossyCompressionQuality: quality])
     }
@@ -101,7 +126,7 @@ enum ImageActions {
         return try write(image, source: url, suffix: " (no metadata)", type: originalFormat(source, url: url), folder: folder)
     }
 
-    private static func write(_ image: CGImage, source: URL, suffix: String, type: UTType,
+    static func write(_ image: CGImage, source: URL, suffix: String, type: UTType,
                               folder: URL, properties: [CFString: Any]? = nil) throws -> URL {
         let ext = type.preferredFilenameExtension ?? "png"
         let preferred = folder.appendingPathComponent(source.deletingPathExtension().lastPathComponent + suffix).appendingPathExtension(ext)
@@ -111,7 +136,13 @@ enum ImageActions {
         guard let encoder = CGImageDestinationCreateWithURL(temporary as CFURL, type.identifier as CFString, 1, nil) else {
             throw error("Cannot create the image encoder. Check the output folder and format.")
         }
-        CGImageDestinationAddImage(encoder, image, properties as CFDictionary?)
+        let encoded: CGImage
+        if type == .jpeg, let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) {
+            let rect = CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height))
+            ctx.setFillColor(CGColor(gray: 1, alpha: 1)); ctx.fill(rect); ctx.draw(image, in: rect)
+            guard let flattened = ctx.makeImage() else { throw error("Cannot render JPEG output.") }; encoded = flattened
+        } else { encoded = image }
+        CGImageDestinationAddImage(encoder, encoded, properties as CFDictionary?)
         guard CGImageDestinationFinalize(encoder) else { throw error("The image encoder could not save the file.") }
         guard let verification = CGImageSourceCreateWithURL(temporary as CFURL, nil),
               let pixels = orientedSize(of: verification), pixels.width == image.width, pixels.height == image.height else {

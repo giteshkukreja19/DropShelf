@@ -96,7 +96,7 @@ enum SmartFileActions {
     // Output is always a new file. The selected folder is optional; the default
     // is a fresh app-owned directory, never the source folder or a stale save location.
     static func performDocument(_ action: Action, urls: [URL], name: String, folder: URL?, pages: String,
-                                dpi: Double, password: String, flag: DocumentCancellation, stitchColumns: Int = 1, stitchRows: Int = 0) async throws -> [URL] {
+                                dpi: Double, password: String, flag: DocumentCancellation, stitchColumns: Int = 1, stitchRows: Int = 0, enhanceImages: Bool = false, stitchGap: Int = 0, stitchBackground: String = "Transparent", rotation: Int = 90, wordMode: String? = nil) async throws -> [URL] {
         try flag.check()
         guard !urls.isEmpty, options(urls).contains(action) else { throw PDFToolkit.error("No compatible files selected.") }
         let base = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -139,7 +139,7 @@ enum SmartFileActions {
         let data: Data
         if action == .pdfWord {
             data = try await Task.detached(priority: .userInitiated) {
-                try PDFWordConverter.convert(urls[0], cancelled: { flag.isCancelled() })
+                try PDFWordConverter.convert(urls[0], modeOverride: wordMode, cancelled: { flag.isCancelled() })
             }.value
         } else if action == .wordPDF {
             data = try await Task.detached(priority: .userInitiated) {
@@ -171,9 +171,9 @@ enum SmartFileActions {
             }.value
         } else if [.mergePDF, .rotatePDF, .extractPDF, .imagePDF, .combinedPDF].contains(action) {
             // PDFKit and CoreGraphics objects stay within the worker.
-            data = try await Task.detached(priority: .userInitiated) { try pdfOutput(action, urls, flag: flag) }.value
+            data = try await Task.detached(priority: .userInitiated) { try pdfOutput(action, urls, flag: flag, enhance: enhanceImages, rotation: rotation) }.value
         } else if action == .stitch {
-            data = try await Task.detached(priority: .userInitiated) { try stitchedImage(urls, flag: flag, columns: stitchColumns, rows: stitchRows) }.value
+            data = try await Task.detached(priority: .userInitiated) { try stitchedImage(urls, flag: flag, columns: stitchColumns, rows: stitchRows, enhance: enhanceImages, gap: stitchGap, background: stitchBackground) }.value
         } else {
             // Word attributed-string import can require the main thread.
             data = try wordOutput(action, urls, flag: flag)
@@ -192,7 +192,7 @@ enum SmartFileActions {
         }.value
     }
     private static func failure(_ message: String) { let a = NSAlert(); a.messageText = "File Action Failed"; a.informativeText = message; a.runModal() }
-    nonisolated private static func pdfOutput(_ action: Action, _ urls: [URL], flag: DocumentCancellation) throws -> Data {
+    nonisolated private static func pdfOutput(_ action: Action, _ urls: [URL], flag: DocumentCancellation, enhance: Bool = false, rotation: Int = 90) throws -> Data {
         let result = PDFDocument()
         var strings: [String] = []
         for url in urls {
@@ -205,11 +205,11 @@ enum SmartFileActions {
                 for index in 0..<document.pageCount {
                     try flag.check()
                     guard let page = document.page(at: index)?.copy() as? PDFPage else { throw PDFToolkit.error("Cannot copy PDF page.") }
-                    if action == .rotatePDF { page.rotation = (page.rotation + 90) % 360 }
+                    if action == .rotatePDF { page.rotation = (page.rotation + rotation) % 360 }
                     result.insert(page, at: result.pageCount)
                 }
             } else if action == .imagePDF || action == .combinedPDF {
-                let page = try autoreleasepool { try imagePDFPage(url) }
+                let page = try autoreleasepool { try imagePDFPage(url, enhance: enhance) }
                 try flag.check()
                 result.insert(page, at: result.pageCount)
             } else {
@@ -226,8 +226,8 @@ enum SmartFileActions {
         return data
     }
 
-    nonisolated private static func imagePDFPage(_ url: URL) throws -> PDFPage {
-        let image = try ImageActions.fullImage(url)
+    nonisolated private static func imagePDFPage(_ url: URL, enhance: Bool = false) throws -> PDFPage {
+        let image = try ImageActions.enhanced(ImageActions.fullImage(url), enabled: enhance)
         let scale = min(CGFloat(1), 14400 / CGFloat(max(image.width, image.height)))
         var box = CGRect(x: 0, y: 0, width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)
         let data = NSMutableData()
@@ -248,8 +248,8 @@ enum SmartFileActions {
         return page
     }
 
-    nonisolated private static func stitchedImage(_ urls: [URL], flag: DocumentCancellation, columns: Int, rows: Int) throws -> Data {
-        guard (1...12).contains(columns), (0...12).contains(rows), !urls.isEmpty else { throw PDFToolkit.error("Invalid grid.") }
+    nonisolated private static func stitchedImage(_ urls: [URL], flag: DocumentCancellation, columns: Int, rows: Int, enhance: Bool = false, gap: Int = 0, background: String = "Transparent") throws -> Data {
+        guard (0...100).contains(gap), (1...12).contains(columns), (0...12).contains(rows), !urls.isEmpty else { throw PDFToolkit.error("Invalid grid.") }
         let rowCount = rows == 0 ? (urls.count + columns - 1) / columns : rows
         guard urls.count <= rowCount * columns, rowCount <= 1000 else { throw PDFToolkit.error("Grid is too small or too large.") }
         var sizes: [ShelfPixelSize] = []
@@ -264,16 +264,20 @@ enum SmartFileActions {
         }
         let fallbackW = widths.max() ?? 1, fallbackH = heights.max() ?? 1
         widths = widths.map { $0 == 0 ? fallbackW : $0 }; heights = heights.map { $0 == 0 ? fallbackH : $0 }
-        let width = widths.reduce(0,+), height = heights.reduce(0,+)
+        let width = widths.reduce(0,+) + gap * (columns - 1), height = heights.reduce(0,+) + gap * (rowCount - 1)
         guard ShelfPixelSize(width: width, height: height).isSafeToRender,
               let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw PDFToolkit.error("Grid exceeds the supported dimensions or 40 megapixel limit.") }
         context.clear(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        if background == "White" || background == "Black" {
+            context.setFillColor(gray: background == "White" ? 1 : 0, alpha: 1)
+            context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        }
         for (i,url) in urls.enumerated() {
             try flag.check()
             let col = i % columns, row = i / columns, size = sizes[i]
-            let x = widths.prefix(col).reduce(0,+) + (widths[col]-size.width)/2
-            let y = height - heights.prefix(row).reduce(0,+) - heights[row] + (heights[row]-size.height)/2
-            try autoreleasepool { let image = try ImageActions.fullImage(url); context.draw(image, in: CGRect(x: CGFloat(x), y: CGFloat(y), width: CGFloat(size.width), height: CGFloat(size.height))) }
+            let x = widths.prefix(col).reduce(0,+) + gap * col + (widths[col]-size.width)/2
+            let y = height - heights.prefix(row).reduce(0,+) - gap * row - heights[row] + (heights[row]-size.height)/2
+            try autoreleasepool { let image = try ImageActions.enhanced(ImageActions.fullImage(url), enabled: enhance); context.draw(image, in: CGRect(x: CGFloat(x), y: CGFloat(y), width: CGFloat(size.width), height: CGFloat(size.height))) }
         }
         try flag.check()
         let data = NSMutableData()

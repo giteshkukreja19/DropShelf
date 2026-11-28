@@ -102,10 +102,20 @@ final class ShelfItemActions: NSObject {
     @objc func copyToPasteboard() {
         let pb = NSPasteboard.general
         pb.clearContents()
-        if let url = item.fileURL {
-            pb.writeObjects([url as NSURL])
-        } else if let text = item.textContent {
+        if let text = item.textContent {
             pb.writeObjects([text as NSString])
+        } else if let url = item.fileURL {
+            pb.writeObjects([url as NSURL])
+        }
+    }
+
+    @objc func retryOCRTranslation() {
+        guard let manager else { return }
+        let id = item.id, shelf = shelfID
+        Task { @MainActor in
+            if let notice = await manager.retryTranslation(itemID: id, shelfID: shelf) {
+                (NSApp.delegate as? AppDelegate)?.showOCRNotice(notice)
+            }
         }
     }
 
@@ -287,20 +297,7 @@ final class ShelfItemActions: NSObject {
     }
 
     @objc func captureScreenText() {
-        guard let mgr = manager else { return }
-        let sID = shelfID
-        Task { @MainActor in
-            do {
-                if let text = try await ScreenOCR.captureAndExtractText() {
-                    mgr.addText(text.text, to: sID, translation: text.metadata)
-                }
-            } catch let error as OCRError {
-                guard error != .cancelled else { return }
-                NSLog("Screen OCR error: \(error.displayMessage)")
-            } catch {
-                NSLog("Screen OCR error: \(error)")
-            }
-        }
+        (NSApp.delegate as? AppDelegate)?.captureScreenText(from: shelfID)
     }
 
 
@@ -372,6 +369,11 @@ enum ShelfContextMenu {
             favourite.target = actions
             favourite.image = NSImage(systemSymbolName: "star", accessibilityDescription: nil)
             menu.addItem(favourite)
+        }
+        if item.type == .text && (item.translation != nil || manager?.clipboardShelfID == shelfID) {
+            let retry = NSMenuItem(title: "Translate / Retry Text", action: #selector(ShelfItemActions.retryOCRTranslation), keyEquivalent: "")
+            retry.target = actions
+            menu.addItem(retry)
         }
         if item.translation != nil {
             let translated = NSMenuItem(title: "Copy Translated Text", action: #selector(ShelfItemActions.copyTranslatedOCRText), keyEquivalent: "")

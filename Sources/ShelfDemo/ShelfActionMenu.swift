@@ -122,20 +122,7 @@ private final class ShelfActionTargets: NSObject {
     }
 
     @objc func captureScreenText() {
-        let mgr = manager
-        let sID = shelfID
-        Task { @MainActor in
-            do {
-                if let text = try await ScreenOCR.captureAndExtractText() {
-                    mgr.addText(text.text, to: sID, translation: text.metadata)
-                }
-            } catch let error as OCRError {
-                guard error != .cancelled else { return }
-                NSLog("Screen OCR error: \(error.displayMessage)")
-            } catch {
-                NSLog("Screen OCR error: \(error)")
-            }
-        }
+        (NSApp.delegate as? AppDelegate)?.captureScreenText(from: shelfID)
     }
 
     @objc func copyAll() {
@@ -143,10 +130,10 @@ private final class ShelfActionTargets: NSObject {
         pb.clearContents()
         var objects: [NSPasteboardWriting] = []
         for item in items {
-            if let url = item.fileURL, FileManager.default.fileExists(atPath: url.path) {
-                objects.append(url as NSURL)
-            } else if let text = item.textContent {
+            if let text = item.textContent {
                 objects.append(text as NSString)
+            } else if let url = item.fileURL, FileManager.default.fileExists(atPath: url.path) {
+                objects.append(url as NSURL)
             }
         }
         if !objects.isEmpty { pb.writeObjects(objects) }

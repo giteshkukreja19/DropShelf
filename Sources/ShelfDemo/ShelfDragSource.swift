@@ -150,8 +150,6 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
             width: cw,
             height: ch
         )
-        let dragImage = snapshotTile(rectInSelf: snapshotRect)
-            ?? NSWorkspace.shared.icon(forFile: urls[0].path)
 
         var draggingItems: [NSDraggingItem] = []
         for (index, url) in urls.enumerated() {
@@ -179,7 +177,17 @@ final class DragInitiatorView: NSView, NSDraggingSource, NSFilePromiseProviderDe
                 width: snapshotRect.width,
                 height: snapshotRect.height
             )
-            item.setDraggingFrame(frame, contents: dragImage)
+            let dragImage: NSImage
+            if let preview = ShelfImagePreview.load(url: url, maxPixel: 192) {
+                dragImage = NSImage(cgImage: preview, size: .zero)
+            } else {
+                dragImage = NSWorkspace.shared.icon(forFile: url.path)
+            }
+            let imageSize = dragImage.size
+            let ratio = min(frame.width / max(1, imageSize.width), frame.height / max(1, imageSize.height))
+            let fitted = NSSize(width: max(1, imageSize.width * ratio), height: max(1, imageSize.height * ratio))
+            let iconFrame = NSRect(x: frame.midX - fitted.width/2, y: frame.midY - fitted.height/2, width: fitted.width, height: fitted.height)
+            item.setDraggingFrame(iconFrame, contents: dragImage)
             draggingItems.append(item)
         }
 

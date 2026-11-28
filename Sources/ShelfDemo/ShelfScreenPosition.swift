@@ -106,3 +106,19 @@ enum ShelfExpandedGeometry {
                       width: size.width, height: size.height)
     }
 }
+
+/// Center the toolbar under its shelf, keeping the hover target stable when expanding.
+enum ShelfInstantGeometry {
+    static func width(expanded: Bool, hasImages: Bool) -> CGFloat {
+        expanded ? (hasImages ? 190 : 168) : 42
+    }
+    static func frame(shelf: CGRect, screen: CGRect, width: CGFloat, hasImages: Bool) -> CGRect {
+        let w = min(width, screen.width)
+        let full = min(Self.width(expanded: true, hasImages: hasImages), screen.width)
+        let center = max(screen.minX + full / 2, min(shelf.midX, screen.maxX - full / 2))
+        let x = max(screen.minX, min(center - w / 2, screen.maxX - w))
+        let below = shelf.minY - 50
+        let y = below >= screen.minY ? below : max(screen.minY, min(shelf.maxY + 8, screen.maxY - 42))
+        return CGRect(x: x, y: y, width: w, height: 42)
+    }
+}

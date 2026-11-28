@@ -33,6 +33,7 @@ struct ShelfFavourite: Codable, Identifiable, Equatable {
     var path: String
 }
 enum ShelfAutomationPreferences {
+    static var monitoringEnabled: Bool { UserDefaults.standard.object(forKey: "shelf.monitor.enabled") as? Bool ?? true }
     static let rulesKey = "shelf.monitor.rules.v1"
     static let favouritesKey = "shelf.favourites.v1"
     static func decode<T: Decodable>(_ type: T.Type, _ data: Data) -> [T] {
@@ -55,10 +56,12 @@ struct ShelfSettingsInfo: View {
     @State private var showing = false
     var body: some View {
         Button { showing.toggle() } label: {
-            Image(systemName: "info.circle").foregroundStyle(.secondary)
+            Image(systemName: "info.circle").foregroundStyle(.secondary).frame(width: 18, height: 22)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("More information")
+        .help(message)
+        .fixedSize()
         .popover(isPresented: $showing, arrowEdge: .trailing) {
             Text(message).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
                 .frame(width: 280, alignment: .leading).padding(16)
@@ -89,7 +92,6 @@ struct ShelfAutomationSettings: View {
                 }
                 if rules.isEmpty { Text("Add a folder to begin monitoring.").foregroundStyle(.secondary) }
             } else {
-                Text("Saved destinations appear in Copy to and Move to. Files are never overwritten.").font(.caption).foregroundStyle(.secondary)
                 ForEach(favourites) { favourite in
                     HStack {
                         Image(systemName: "folder")
@@ -100,7 +102,7 @@ struct ShelfAutomationSettings: View {
                     Divider()
                 }
             }
-            HStack { Spacer(); Button(monitoring ? "Add Folder…" : "Add Favourite…") { choose() }.buttonStyle(ShelfSmallButton()).disabled(choosing) }
+            HStack { Spacer(); Button(monitoring ? "Add Folder…" : "Add Favourite…") { choose() }.buttonStyle(ShelfSmallButton()).disabled(choosing); if !monitoring { ShelfSettingsInfo(message: "Saved destinations appear in Copy to and Move to. Files are never overwritten.") } }
         }
     }
     private func choose() {

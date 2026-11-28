@@ -7,7 +7,7 @@ enum ScreenOCR {
     /// Launches macOS interactive screen capture (`screencapture -i`).
     /// User drags crosshairs to select a rectangle.
     /// Runs Vision OCR on the captured image.
-    /// Copies extracted text to the general pasteboard and returns it.
+    /// Returns extracted text for the caller to save and copy.
     /// Returns `nil` if the user cancels (e.g. presses Escape or clicks without dragging).
     @discardableResult
     static func captureAndExtractText() async throws -> ShelfOCRResult? {
@@ -48,12 +48,6 @@ enum ScreenOCR {
 
         let text = try await ImageOCR.extractText(source: tempURL)
 
-        let result = await ShelfOCRTranslation.process(text)
-        await MainActor.run {
-            let pb = NSPasteboard.general
-            pb.clearContents()
-            pb.setString(result.text, forType: .string)
-        }
-        return result
+        return await ShelfOCRTranslation.process(text)
     }
 }

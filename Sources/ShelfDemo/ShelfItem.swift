@@ -57,6 +57,14 @@ struct ShelfItem: Identifiable, Equatable {
         self.cachedFolderBytes = cachedFolderBytes
     }
 
+    func refreshingRetention(at date: Date = Date()) -> ShelfItem {
+        ShelfItem(id: id, type: type, fileURL: fileURL, textContent: textContent,
+                  thumbnail: thumbnail, thumbnailIsIcon: thumbnailIsIcon,
+                  createdAt: date, pixelSize: pixelSize, pageCount: pageCount,
+                  isDirectory: isDirectory, cachedFolderBytes: cachedFolderBytes,
+                  translation: translation)
+    }
+
     var displayName: String {
         // Text snippets prefer the snippet preview as the visible label, even
         // when they're backed by a temp file (so Open / Reveal-in-Finder can

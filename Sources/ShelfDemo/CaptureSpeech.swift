@@ -170,8 +170,7 @@ struct CaptureSpeechSettings: View {
             if enabled {
                 HStack { Text("Language"); Spacer(); ModernSettingsMenu(title: "Language", selection: $locale, options: options) }
                 toggle("Show live captions", $captions)
-                toggle("Include captions in video", $embed)
-                if embed { Text("Exports a separate captioned video; the original is preserved.").font(.caption).foregroundStyle(.secondary) }
+                HStack { toggle("Include captions in video", $embed); ShelfSettingsInfo(message: "Exports a separate captioned video; the original is preserved.") }
                 toggle("Save transcript file", $save)
                 if save {
                     HStack { Text("Transcript format"); Spacer(); ModernSettingsMenu(title: "Format", selection: $format, options: [("TXT", "TXT"), ("SRT", "SRT"), ("Both", "TXT & SRT")]) }

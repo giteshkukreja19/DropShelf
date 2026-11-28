@@ -14,7 +14,7 @@ struct ShelfDemoApp {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
-        guard ShelfDataLocation.prepare() else { return }
+        guard InstallerLifecycle.allowLaunch(), ShelfDataLocation.prepare() else { return }
         let delegate = AppDelegate()
         app.delegate = delegate
 
@@ -103,6 +103,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var shortcutLocalMonitor: Any?
     private var pasteMonitor: Any?
     private var screenCaptureActive = false
+    private var clipboardTimer: Timer?
+    private var clipboardChangeCount = 0
+    private var clipboardWasEnabled = false
+    private var welcomeWindow: NSWindow?
+    func refreshKeyboardCleaningPin() {
+        if let menu = statusItem?.menu { rebuildStatusMenu(menu) }
+    }
+
+    @objc func openKeyboardCleaning() { KeyboardCleaningController.shared.show() }
+
+    private func showFirstLaunchGuide() {
+        guard !UserDefaults.standard.bool(forKey: "guide.welcomeShown") else { return }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 440), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "Welcome to DropShelf"
+        window.isReleasedWhenClosed = false
+        window.contentViewController = NSHostingController(rootView: ShelfQuickGuideView(whatsNew: false, onFinish: { [weak window] in window?.close() }))
+        welcomeWindow = window
+        UserDefaults.standard.set(true, forKey: "guide.welcomeShown")
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func pollClipboard() {
+        let pb = NSPasteboard.general
+        let enabled = UserDefaults.standard.bool(forKey: "clipboard.autoCollect")
+        guard enabled, clipboardWasEnabled else { clipboardWasEnabled = enabled; clipboardChangeCount = pb.changeCount; return }
+        guard pb.changeCount != clipboardChangeCount else { return }
+        clipboardChangeCount = pb.changeCount
+        let previousCount = manager.clipboardShelfID.map { manager.items(of: $0).count } ?? 0
+        manager.collectClipboard(pb)
+        if UserDefaults.standard.bool(forKey: "clipboard.showOnCopy"), let id = manager.clipboardShelfID,
+           manager.items(of: id).count > previousCount {
+            openPanel(for: id, nearCursor: true)
+        }
+    }
+
+    @objc private func openClipboardShelf() { openPanel(for: manager.ensureClipboardShelf(), nearCursor: false) }
+    func checkForUpdatesFromSettings() { updateController.updaterController.checkForUpdates(nil) }
+
 
     private func applyStatusIcon(dropping: Bool? = nil, awake: Bool? = nil) {
         if let dropping { dropTargetActive = dropping }
@@ -231,7 +271,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Lifecycle
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    func restartFolderMonitoring() {
+        folderMonitor.stop()
+        guard ShelfAutomationPreferences.monitoringEnabled else { return }
         folderMonitor.start { [weak self] rule, urls in
             guard let self else { return }
             let existing = self.monitoredShelves[rule.id]
@@ -241,6 +283,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             for url in urls where !self.manager.containsFile(url: url, in: id) { _ = self.manager.addFile(url: url, to: id) }
             if !self.manager.items(of: id).isEmpty, self.panels[id]?.isVisible != true { self.openPanel(for: id, nearCursor: false) }
         }
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        restartFolderMonitoring()
         let defaults = UserDefaults.standard
         if !defaults.bool(forKey: "shelf.compactLayoutMigration2") {
             if defaults.string(forKey: ShelfExpandedGeometry.dimensionsKey) == "520,340" {
@@ -275,6 +321,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         installPasteShortcut()
         installShelfShortcuts()
+        clipboardChangeCount = NSPasteboard.general.changeCount
+        clipboardWasEnabled = UserDefaults.standard.bool(forKey: "clipboard.autoCollect")
+        clipboardTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pollClipboard() }
+        }
+        InstallerLifecycle.ejectAfterInstalledLaunch()
+        refreshKeyboardCleaningPin()
+        DispatchQueue.main.async { [weak self] in self?.showFirstLaunchGuide() }
+
 
         shelvesCancellable = manager.$shelves
             .sink { [weak self] shelves in
@@ -350,6 +405,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func runShelfExpiryPrune() {
         let days = UserDefaults.standard.integer(forKey: "shelf.expiryDays")
+        let clipboardDays = UserDefaults.standard.object(forKey: "shelf.expiryDays") as? Int ?? ShelfExpiry.tenDays.rawValue
+        if !manager.isDragging { manager.pruneClipboard(olderThanDays: clipboardDays) }
         guard days != 0, !manager.isDragging, !screenCaptureActive else { return }
         let removed = manager.pruneShelves(olderThanDays: days)
         for shelfID in removed {
@@ -415,7 +472,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(newShelf)
 
         let newFromClip = NSMenuItem(
-            title: L("New Shelf From Clipboard"),
+            title: "Clipboard Shelf",
             action: #selector(newShelfFromClipboardAction),
             keyEquivalent: "a"
         )
@@ -431,6 +488,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         captureScreen.target = self
         ShelfShortcut.capture.configure(captureScreen)
         menu.addItem(captureScreen)
+        if KeyboardCleaningController.enabled && UserDefaults.standard.bool(forKey: "keyboardCleaning.pin") {
+            let item = NSMenuItem(title: "Keyboard Cleaning…", action: #selector(openKeyboardCleaning), keyEquivalent: "")
+            item.target = self
+            ShelfShortcut.keyboardCleaning.configure(item)
+            menu.addItem(item)
+        }
         if #available(macOS 15.0, *) {
             let recorder = ShelfScreenRecorder.shared
             if UserDefaults.standard.bool(forKey: "recorder.enabled") || recorder.busy {
@@ -733,30 +796,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func newShelfFromClipboardAction() {
-        let shelfID = manager.createShelf()
-        _ = manager.addFromClipboard(to: shelfID)
-        openPanel(for: shelfID, nearCursor: false)
+        manager.collectClipboard(NSPasteboard.general)
+        clipboardChangeCount = NSPasteboard.general.changeCount
+        openClipboardShelf()
     }
 
-    @objc private func captureScreenTextAction() {
+    @objc private func captureScreenTextAction() { captureScreenText() }
+
+    func captureScreenText(from shelfID: UUID? = nil) {
         guard !screenCaptureActive else { return }
         screenCaptureActive = true
         Task { @MainActor in
             defer { screenCaptureActive = false }
             do {
+                let change = NSPasteboard.general.changeCount
                 guard let text = try await ScreenOCR.captureAndExtractText() else { return }
-                let shelfID = activeOrNewShelfID()
-                manager.addText(text.text, to: shelfID, translation: text.metadata)
-                openPanel(for: shelfID, nearCursor: false)
-                if let panel = panels[shelfID] {
-                    if dockedShelfIDs.contains(shelfID) {
-                        setPanelDocked(shelfID, docked: false)
-                        manager.undockRequested.send(shelfID)
-                    }
-                    manager.revealRequested.send(shelfID)
-                    panel.orderFrontRegardless()
-                    showToast(L("Text copied to clipboard"), near: panel)
+                let clipboardID = manager.saveCapturedText(text)
+                if let shelfID, shelfID != clipboardID, manager.shelf(id: shelfID) != nil,
+                   !manager.items(of: shelfID).contains(where: { $0.textContent == text.text && $0.translation == text.metadata }) {
+                    manager.addText(text.text, to: shelfID, translation: text.metadata)
+                    manager.flushStore()
                 }
+                let pb = NSPasteboard.general
+                if pb.changeCount == change {
+                    pb.clearContents(); pb.setString(text.text, forType: .string)
+                    clipboardChangeCount = pb.changeCount
+                }
+                openPanel(for: clipboardID, nearCursor: true)
+                if let notice = text.notice { showConversionFailureToast(message: notice) }
+                else { showConversionFailureToast(message: "OCR text saved to Clipboard Shelf") }
             } catch let error as OCRError {
                 guard error != .cancelled else { return }
                 showConversionFailureToast(message: error.displayMessage)
@@ -773,7 +841,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let visibleID = panels.first(where: { $0.value.isVisible })?.key {
             return visibleID
         }
-        if let lastID = manager.shelves.last?.id {
+        if let lastID = manager.shelves.last(where: { $0.id != manager.clipboardShelfID })?.id {
             return lastID
         }
         return manager.createShelf()
@@ -929,7 +997,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Empty shelves are invisible in Recent Shelves, so dismissing them
         // would otherwise leave a zombie behind. Tear them down completely
         // when the user clicks X on an empty shelf.
-        if manager.items(of: shelfID).isEmpty {
+        if manager.items(of: shelfID).isEmpty, shelfID != manager.clipboardShelfID {
             panels.removeValue(forKey: shelfID)
             ephemeralShelfIDs.remove(shelfID)
             manager.removeShelf(id: shelfID)
@@ -1334,6 +1402,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showToast(L("toast.duplicate"), near: shelfPanel)
     }
 
+    func showOCRNotice(_ message: String) { showConversionFailureToast(message: message) }
+
     private func showConversionFailureToast(message: String) {
         // Reuse the toast panel infrastructure with custom text. If no shelf
         // panel is currently visible, fall back to a banner attached to the
@@ -1416,6 +1486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Quit
 
     func applicationWillTerminate(_ notification: Notification) {
+        KeyboardCleaningController.shared.stop()
         folderMonitor.stop()
         for id in Array(parkJobs.keys) { cancelPark(id) }
         if let monitor = shortcutGlobalMonitor { NSEvent.removeMonitor(monitor) }
@@ -1424,6 +1495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let monitor = outsideClickMonitor { NSEvent.removeMonitor(monitor) }
         missingFileSweepTimer?.invalidate()
         expiryTimer?.invalidate()
+        clipboardTimer?.invalidate()
         manager.flushStore()
         conversionService.cancelAll()
         ocrService.cancelAll()
@@ -1445,6 +1517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .new: newShelfAction()
             case .clipboard: newShelfFromClipboardAction()
             case .capture: captureScreenTextAction()
+            case .keyboardCleaning: openKeyboardCleaning()
             case .recordingControls:
                 if #available(macOS 15.0, *) { ShelfScreenRecorder.shared.openLauncher() }
             case .stopRecording:

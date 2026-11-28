@@ -12,7 +12,7 @@ final class ShelfFolderMonitor {
     func start(deliver: @escaping (ShelfFolderRule, [URL]) -> Void) {
         stop()
         task = Task { [weak self] in
-            while !Task.isCancelled {
+            while !Task.isCancelled && ShelfAutomationPreferences.monitoringEnabled {
                 guard let self else { return }
                 let rules = ShelfAutomationPreferences.rules().filter(\.enabled)
                 let ids = Set(rules.map(\.id))
@@ -21,7 +21,7 @@ final class ShelfFolderMonitor {
                     let scanned = await Task.detached(priority: .utility) {
                         rules.map { ($0, Self.scan($0)) }
                     }.value
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled, ShelfAutomationPreferences.monitoringEnabled else { return }
                     for (rule, result) in scanned {
                         guard ShelfAutomationPreferences.rules().contains(rule) else { self.states.removeValue(forKey: rule.id); continue }
                         guard let files = result else { UserDefaults.standard.set("Cannot read folder", forKey: "shelf.monitor.status." + rule.id.uuidString); continue }
@@ -42,6 +42,7 @@ final class ShelfFolderMonitor {
                             let batch = state.queued.keys.sorted { $0.path < $1.path }
                             state.queued.removeAll()
                             var delivered = batch
+                            guard !Task.isCancelled, ShelfAutomationPreferences.monitoringEnabled else { return }
                             if !batch.isEmpty, let organization = rule.organization, organization.action != "Collect only" {
                                 let monitored = ShelfAutomationPreferences.rules()
                                 let result = await Task.detached(priority: .utility) { ShelfOrganization.organize(batch, rule: organization, monitors: monitored) }.value
@@ -49,11 +50,12 @@ final class ShelfFolderMonitor {
                                 delivered = result.urls
                                 if let failure = result.events.first(where: { $0.output == nil }) { UserDefaults.standard.set(failure.message, forKey: "shelf.monitor.status." + rule.id.uuidString) }
                             }
-                            if !Task.isCancelled && ShelfAutomationPreferences.rules().contains(rule) {
+                            if !Task.isCancelled && ShelfAutomationPreferences.monitoringEnabled && ShelfAutomationPreferences.rules().contains(rule) {
                                 if rule.newShelf { for url in delivered { deliver(rule, [url]) } }
                                 else if !delivered.isEmpty { deliver(rule, delivered) }
                             }
                         }
+                        guard !Task.isCancelled, ShelfAutomationPreferences.monitoringEnabled else { return }
                         self.states[rule.id] = state
                     }
                 }

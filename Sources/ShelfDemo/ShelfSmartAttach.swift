@@ -15,6 +15,8 @@ enum ShelfSmartAttach {
         "com.google.Chrome", "com.apple.Safari", "com.brave.Browser", "com.microsoft.edgemac"
     ]
 
+    static func permissionGranted() -> Bool { AXIsProcessTrusted() }
+
     static func requestPermission() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
@@ -76,7 +78,7 @@ enum ShelfSmartAttach {
     private static func nodes(_ root: AXUIElement, limit: Int = 2200) -> [AXUIElement] {
         var queue = [root], result: [AXUIElement] = []
         var index = 0
-        let deadline = CACurrentMediaTime() + 0.65
+        let deadline = CACurrentMediaTime() + 1.2
         while index < queue.count && index < limit && CACurrentMediaTime() < deadline {
             let node = queue[index]; index += 1; result.append(node)
             if queue.count < limit { queue.append(contentsOf: children(node).prefix(limit - queue.count)) }
@@ -86,13 +88,34 @@ enum ShelfSmartAttach {
 
     private static func isGmail(_ node: AXUIElement) -> Bool {
         guard string(node, kAXRoleAttribute) == "AXWebArea",
-              let url = attribute(node, kAXURLAttribute) as? URL else { return false }
-        return url.scheme == "https" && url.host == "mail.google.com" && url.path.hasPrefix("/mail/") && (url.fragment?.contains("compose=") == true)
+              let value = attribute(node, kAXURLAttribute) else { return false }
+        let url = (value as? URL) ?? (value as? String).flatMap { URL(string: $0) }
+        guard let url else { return false }
+        return url.scheme == "https" && url.host == "mail.google.com" && url.path.hasPrefix("/mail/")
     }
 
     private static func named(_ node: AXUIElement, _ name: String) -> Bool {
         [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute].contains {
             string(node, $0)?.trimmingCharacters(in: .whitespacesAndNewlines).localizedCaseInsensitiveCompare(name) == .orderedSame
+        }
+    }
+
+    private static func gmailDocuments(_ window: AXUIElement, app: AXUIElement) -> [AXUIElement] {
+        // Prefer the focused web area, avoiding inactive tabs and inbox tree truncation.
+        var current = element(attribute(app, kAXFocusedUIElementAttribute))
+        for _ in 0..<40 {
+            guard let node = current else { break }
+            if isGmail(node) { return [node] }
+            current = element(attribute(node, kAXParentAttribute))
+        }
+        return nodes(window).filter(isGmail)
+    }
+
+    private static func attachButtons(_ doc: AXUIElement) -> [AXUIElement] {
+        nodes(doc, limit: 5000).filter { node in
+            guard string(node, kAXRoleAttribute) == kAXButtonRole,
+                  (attribute(node, kAXEnabledAttribute) as? Bool) != false else { return false }
+            return ["Attach files", "Attach file", "Attach files (Ctrl+Shift+A)", "Attach files (⌘⇧A)"].contains { named(node, $0) }
         }
     }
 
@@ -107,7 +130,10 @@ enum ShelfSmartAttach {
         var browser: NSRunningApplication?
         var app: AXUIElement?
         var button: AXUIElement?
-        for _ in 0..<48 {
+        var enabledAccessibility = Set<pid_t>()
+        var stage = "Waiting for a supported browser"
+        var openedCompose = false
+        for attempt in 0..<64 {
             await wait()
             guard !Task.isCancelled else { return }
             guard !DragInitiatorView.hasActiveDrag, NSEvent.pressedMouseButtons == 0,
@@ -115,26 +141,42 @@ enum ShelfSmartAttach {
                   let bundle = front.bundleIdentifier, supportedBrowsers.contains(bundle) else { continue }
             let candidate = AXUIElementCreateApplication(front.processIdentifier)
             AXUIElementSetMessagingTimeout(candidate, 0.25)
+            if bundle != "com.apple.Safari", enabledAccessibility.insert(front.processIdentifier).inserted {
+                // Chromium exposes this opt-in AX attribute to accessibility clients.
+                // If unsupported, continue with ordinary accessibility discovery.
+                _ = AXUIElementSetAttributeValue(candidate, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+                _ = AXUIElementSetAttributeValue(candidate, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+            }
             guard let window = element(attribute(candidate, kAXFocusedWindowAttribute)) else { continue }
-            let tree = nodes(window)
-            let documents = tree.filter(isGmail)
+            stage = "Waiting for the Gmail web area"
+            let documents = gmailDocuments(window, app: candidate)
             guard documents.count == 1 else { continue }
-            let buttons = nodes(documents[0]).filter { string($0, kAXRoleAttribute) == kAXButtonRole && named($0, "Attach files") }
+            let doc = documents[0]
+            let buttons = attachButtons(doc)
+            stage = "Gmail found; attachment controls: \(buttons.count)"
+            if buttons.isEmpty && !openedCompose && attempt >= 12 {
+                let compose = nodes(doc, limit: 5000).filter {
+                    string($0, kAXRoleAttribute) == kAXButtonRole && named($0, "Compose")
+                }
+                // Only use the Compose button after allowing the initial compose URL to settle.
+                if enabledAccessibility.contains(front.processIdentifier), compose.count == 1,
+                   isFront(front.processIdentifier), NSEvent.pressedMouseButtons == 0 {
+                    openedCompose = AXUIElementPerformAction(compose[0], kAXPressAction as CFString) == .success
+                }
+            }
             guard buttons.count == 1 else { continue }
             browser = front; app = candidate; button = buttons[0]; break
         }
         guard let browser, let app, let button, isFront(browser.processIdentifier) else {
-            report("Gmail attachment control not found uniquely. Check browser accessibility and attach manually.")
+            report(stage + ". Automatic attachment stopped; drag the file into Gmail manually.")
             return
         }
         report("Gmail attachment control found. Opening picker…")
         let pid = browser.processIdentifier
-        if let origin, let target = frame(button), !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            await fly(file: file, origin: origin, target: target)
-        }
+        let animationTarget = frame(button)
         guard isFront(pid), NSEvent.pressedMouseButtons == 0,
               let current = element(attribute(app, kAXFocusedWindowAttribute)),
-              nodes(current).filter(isGmail).contains(where: { doc in nodes(doc).contains(where: { CFEqual($0, button) }) }),
+              gmailDocuments(current, app: app).contains(where: { doc in attachButtons(doc).contains(where: { CFEqual($0, button) }) }),
               AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else { report("Attachment button could not be activated. Attach manually."); return }
 
         // Native Open panel only. Never inject text into the Gmail message.
@@ -180,9 +222,33 @@ enum ShelfSmartAttach {
             }
             guard exact, let open = tree.first(where: { string($0, kAXRoleAttribute) == kAXButtonRole && named($0, "Open") && (attribute($0, kAXEnabledAttribute) as? Bool) == true }) else { continue }
             guard isFront(pid), NSEvent.pressedMouseButtons == 0 else { return }
-            _ = AXUIElementPerformAction(open, kAXPressAction as CFString)
+            guard AXUIElementPerformAction(open, kAXPressAction as CFString) == .success else {
+                report("Could not confirm the picker. Attach manually."); return
+            }
             // This requests attachment only. Gmail may reject the upload.
-            report("File picker confirmed. Verify upload in Gmail draft.")
+            report("File picker confirmed. Checking Gmail draft…")
+            // Do not animate until a matching attachment control appears in the compose area.
+            for _ in 0..<32 {
+                await wait()
+                guard isFront(pid), let window = element(attribute(app, kAXFocusedWindowAttribute)) else { break }
+                let documents = gmailDocuments(window, app: app)
+                guard documents.count == 1 else { continue }
+                let tree = nodes(documents[0])
+                let filename = file.lastPathComponent
+                // Require the attachment removal control to name this exact file; a matching inbox subject is not evidence.
+                let confirmed = tree.contains { node in
+                    guard string(node, kAXRoleAttribute) == kAXButtonRole else { return false }
+                    return named(node, "Remove attachment " + filename) || named(node, "Remove " + filename) || named(node, "Remove attachment: " + filename)
+                }
+                if confirmed {
+                    report("Attachment visible in Gmail draft. Review before sending.")
+                    if let origin, let target = animationTarget, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                        await fly(file: file, origin: origin, target: target)
+                    }
+                    return
+                }
+            }
+            report("Attachment requested; upload could not be verified. Review Gmail draft before retrying.")
             return
         }
         _ = picker // retain the identified native dialog while navigating

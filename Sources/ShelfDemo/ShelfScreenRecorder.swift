@@ -16,6 +16,8 @@ import UniformTypeIdentifiers
     private var output: SCRecordingOutput?
     private var cameraSession: AVCaptureSession?
     private var cameraPanel: NSPanel?
+    private let cameraQueue = DispatchQueue(label: "DropShelf.camera.session")
+    private var skipCameraForTake = false
     private var controls: NSPanel?
     private var destination: URL?
     private var stopping = false
@@ -93,9 +95,45 @@ import UniformTypeIdentifiers
         let y = max(safe.minY + 8, min(panel.frame.maxY, safe.maxY - 8) - height)
         panel.setFrame(NSRect(x: panel.frame.minX, y: y, width: 76, height: height), display: true)
     }
-    func closeLauncher() { launcher?.orderOut(nil); launcher = nil }
+    func closeLauncher() { guard !busy else { return }; launcher?.orderOut(nil); launcher = nil }
+    private enum PermissionChoice { case without, cancel }
+    private func permissionChoice(_ device: String, pane: String) -> PermissionChoice {
+        let alert = NSAlert()
+        alert.messageText = "\(device) access required"
+        alert.informativeText = "Allow access in Privacy & Security, or continue without \(device.lowercased()) for this take."
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Continue Without \(device)")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        let result = alert.runModal()
+        if result == .alertFirstButtonReturn {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") { NSWorkspace.shared.open(url) }
+        }
+        return result == .alertSecondButtonReturn ? .without : .cancel
+    }
+    private func cameraRequested() -> Bool {
+        let prefs = UserDefaults.standard
+        return prefs.bool(forKey: "recorder.camera") && (prefs.string(forKey: "recorder.mode") ?? "Full screen") == "Full screen" && !skipCameraForTake
+    }
     func beginFromLauncher() async {
         guard !busy, launcher != nil else { return }
+        busy = true
+        skipCameraForTake = false
+        defer { busy = false }
+        if cameraRequested() {
+            if await AVCaptureDevice.requestAccess(for: .video) {
+                do { try await showCamera() }
+                catch {
+                    let alert = NSAlert(); alert.messageText = "Camera preview unavailable"; alert.informativeText = error.localizedDescription
+                    alert.addButton(withTitle: "Continue Without Camera"); alert.addButton(withTitle: "Cancel")
+                    guard alert.runModal() == .alertFirstButtonReturn else { return }
+                    skipCameraForTake = true
+                }
+            } else {
+                guard permissionChoice("Camera", pane: "Privacy_Camera") == .without else { return }
+                skipCameraForTake = true
+            }
+        }
         launcher?.orderOut(nil); launcher = nil
         for window in NSApp.windows where window.isVisible && window.title == "DropShelf Settings" { window.orderOut(nil) }
         status = "Ready"
@@ -104,6 +142,7 @@ import UniformTypeIdentifiers
     func cancelPreparation() {
         guard !busy else { return }
         controls?.orderOut(nil); controls = nil
+        hideCamera()
         status = "Ready"
         openLauncher()
     }
@@ -114,8 +153,23 @@ import UniformTypeIdentifiers
         status = "Preparing…"
         do {
             let defaults = UserDefaults.standard
-            let camera = defaults.bool(forKey: "recorder.camera") && (defaults.string(forKey: "recorder.mode") ?? "Full screen") == "Full screen"
-            let mic = defaults.bool(forKey: "recorder.microphone")
+            var camera = cameraRequested()
+            var mic = defaults.bool(forKey: "recorder.microphone")
+            if camera && AVCaptureDevice.authorizationStatus(for: .video) != .authorized {
+                let allowed = await AVCaptureDevice.requestAccess(for: .video)
+                if !allowed {
+                    guard permissionChoice("Camera", pane: "Privacy_Camera") == .without else { returnToReady("Recording cancelled"); return }
+                    skipCameraForTake = true; hideCamera(); camera = false
+                }
+            }
+            if !camera { hideCamera() }
+            if mic {
+                let allowed = await AVCaptureDevice.requestAccess(for: .audio)
+                if !allowed {
+                    guard permissionChoice("Microphone", pane: "Privacy_Microphone") == .without else { returnToReady("Recording cancelled"); return }
+                    mic = false
+                }
+            }
             if mic && defaults.bool(forKey: "recorder.speechEnabled") {
                 do {
                     let recognizer = try await CaptureSpeech.authorized(locale: defaults.string(forKey: "recorder.speechLocale") ?? "en-IN")
@@ -126,9 +180,13 @@ import UniformTypeIdentifiers
                     if alert.runModal() != .alertFirstButtonReturn { returnToReady("Recording cancelled"); return }
                 }
             }
-            if camera { guard await AVCaptureDevice.requestAccess(for: .video) else { throw failure("Camera permission denied") } }
-            if mic { guard await AVCaptureDevice.requestAccess(for: .audio) else { throw failure("Microphone permission denied") } }
-            guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else { throw failure("Enable Screen & System Audio Recording in System Settings, then reopen DropShelf.") }
+            guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
+                returnToReady("Screen recording permission required")
+                let alert = NSAlert(); alert.messageText = "Screen recording access required"; alert.informativeText = "Enable DropShelf in Screen & System Audio Recording, then reopen the app if macOS requests it."
+                alert.addButton(withTitle: "Open System Settings"); alert.addButton(withTitle: "Cancel")
+                if alert.runModal() == .alertFirstButtonReturn, let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) }
+                return
+            }
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first else { throw failure("No display available") }
             let mode = defaults.string(forKey: "recorder.mode") ?? "Full screen"
@@ -159,6 +217,7 @@ import UniformTypeIdentifiers
             destination = url
             segmentURL = url.deletingLastPathComponent().appendingPathComponent("Segment-\(UUID().uuidString).mp4")
             controls?.orderFrontRegardless()
+            if camera { try await showCamera() }
             countdownCancelled = false
             if defaults.object(forKey: "recorder.countdownEnabled") == nil || defaults.bool(forKey: "recorder.countdownEnabled") {
                 let stored = defaults.integer(forKey: "recorder.countdownSeconds")
@@ -172,14 +231,13 @@ import UniformTypeIdentifiers
                         if countdownCancelled {
                             countdownRemaining = 0
                             destination = nil; segmentURL = nil
-                            cleanup(); status = "Ready"; showControls()
+                            cleanup(); status = "Ready"; openLauncher()
                             return
                         }
                     }
                 }
             }
             countdownRemaining = 0
-            if camera { try showCamera() }
             if let speech, defaults.object(forKey: "recorder.speechCaptions") == nil || defaults.bool(forKey: "recorder.speechCaptions") {
                 let frame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
                 let width = min(CGFloat(520), frame.width - 40)
@@ -340,14 +398,20 @@ import UniformTypeIdentifiers
     }
     private func cleanup() {
         speech?.end(); speech = nil; captionPanel?.orderOut(nil); captionPanel = nil
-        cameraPanel?.orderOut(nil); cameraPanel = nil
+        hideCamera()
         controls?.orderOut(nil); controls = nil
-        cameraSession?.stopRunning(); cameraSession = nil
         stream = nil; output = nil; destination = nil; busy = false; recording = false; stopping = false; startedAt = nil
         segments = []; segmentURL = nil; paused = false; pausing = false; transitioning = false; accumulated = 0
         countdownRemaining = 0; countdownCancelled = false
     }
-    private func showCamera() throws {
+    private func hideCamera() {
+        cameraPanel?.orderOut(nil); cameraPanel = nil
+        if let session = cameraSession { cameraQueue.async { session.stopRunning() } }
+        cameraSession = nil
+    }
+    private func showCamera() async throws {
+        if let session = cameraSession, session.isRunning, let panel = cameraPanel { panel.orderFrontRegardless(); return }
+        hideCamera()
         guard let device = AVCaptureDevice.default(for: .video) else { throw failure("No camera available") }
         let session = AVCaptureSession()
         let input = try AVCaptureDeviceInput(device: device)
@@ -365,7 +429,11 @@ import UniformTypeIdentifiers
         view.layer?.cornerRadius = prefs.string(forKey: "recorder.cameraShape") == "Square" ? 0 : (prefs.string(forKey: "recorder.cameraShape") == "Rounded" ? 18 : size/2); view.layer?.masksToBounds = true
         let layer = AVCaptureVideoPreviewLayer(session: session); layer.frame = view.bounds; layer.videoGravity = .resizeAspectFill
         view.layer?.addSublayer(layer); panel.contentView = view
-        cameraSession = session; cameraPanel = panel; session.startRunning(); panel.orderFrontRegardless()
+        let running: Bool = await withCheckedContinuation { continuation in
+            cameraQueue.async { session.startRunning(); continuation.resume(returning: session.isRunning) }
+        }
+        guard running else { throw failure("Camera could not start") }
+        cameraSession = session; cameraPanel = panel; panel.orderFrontRegardless()
     }
     private func showControls() {
         let frame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
@@ -398,7 +466,6 @@ struct ShelfRecorderSettings: View {
 private struct ShelfRecorderOptions: View {
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject private var recorder = ShelfScreenRecorder.shared
-    @AppStorage("recorder.enabled") private var enabled = false
     @AppStorage("recorder.offerSilenceEdit") private var offerSilenceEdit = false
     @AppStorage("recorder.countdownEnabled") private var countdownEnabled = true
     @AppStorage("recorder.countdownSeconds") private var countdownSeconds = 3
@@ -414,16 +481,11 @@ private struct ShelfRecorderOptions: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Button { recorder.openLauncher() } label: { Label("Start Recording…", systemImage: "record.circle").frame(maxWidth: .infinity) }.buttonStyle(.borderedProminent).controlSize(.large).disabled(recorder.busy)
+                Button { recorder.openLauncher() } label: { Label("Start Recording…", systemImage: "record.circle").frame(maxWidth: .infinity) }.buttonStyle(.borderedProminent).tint(.red).controlSize(.large).disabled(recorder.busy)
                 if recorder.busy { Button("Stop") { Task { await recorder.stop() } }.disabled(!recorder.recording) }
             }
             section("Capture and audio") {
-                toggle("Show in menu bar", $enabled)
-                Divider()
                 HStack { Text("Capture mode"); Spacer(); ModernSettingsMenu(title: "Capture mode", selection: $mode, options: [("Full screen", "Full screen"), ("Window", "Window"), ("Area", "Area")]) }
-                if mode == "Area" {
-                    Text("Select the recording area visually from the recording controls.").font(.caption).foregroundStyle(.secondary)
-                }
                 Divider()
                 toggle("Camera bubble", $camera).disabled(mode != "Full screen")
                 if camera && mode == "Full screen" {
@@ -441,7 +503,6 @@ private struct ShelfRecorderOptions: View {
                 if countdownEnabled {
                     HStack { Text("Countdown duration"); Spacer(); ModernSettingsMenu(title: "Countdown", selection: $countdownSeconds, options: [(3, "3 seconds"), (5, "5 seconds"), (10, "10 seconds"), (0, "Manual Start")]) }
                 }
-                Text("The countdown starts only after pressing Record on the floating toolbar. Manual Start records immediately.").font(.caption).foregroundStyle(.secondary)
             }
             section("Output preferences") {
                 HStack { Text("Video quality"); Spacer(); ModernSettingsMenu(title: "Video quality", selection: $height, options: [(720, "720p"), (1080, "1080p"), (1440, "1440p"), (0, "Native Retina")]) }
@@ -490,9 +551,9 @@ private struct CaptureLauncher: View {
             HStack { Label("Live speech recognition", systemImage: "waveform"); Spacer(); Toggle("Live speech recognition", isOn: $speechEnabled).labelsHidden().toggleStyle(.switch).disabled(!mic) }
             if speechEnabled && mic { Text("Language, captions and transcript options are in Capture Studio settings.").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
             Divider()
-            Text("Continue to the floating toolbar. Press Record when you are ready.").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Button { Task { await recorder.beginFromLauncher() } } label: { Text("Continue").frame(maxWidth: .infinity) }.buttonStyle(.borderedProminent)
-        }.padding(18).font(.system(size: 13)).frame(width: 360).fixedSize(horizontal: false, vertical: true).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+            Text("Continue opens the preview and controls. Press Record when ready.").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Button { Task { await recorder.beginFromLauncher() } } label: { Text(recorder.busy ? "Preparing…" : "Continue").frame(maxWidth: .infinity) }.buttonStyle(.borderedProminent).disabled(recorder.busy)
+        }.disabled(recorder.busy).padding(18).font(.system(size: 13)).frame(width: 360).fixedSize(horizontal: false, vertical: true).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
             .onChange(of: speechEnabled) { _ in DispatchQueue.main.async { recorder.resizeLauncher() } }
             .onChange(of: mic) { _ in DispatchQueue.main.async { recorder.resizeLauncher() } }
     }
@@ -623,7 +684,7 @@ private final class CaptureAreaView: NSView {
             text.draw(at: CGPoint(x: rect.midX-size.width/2, y: rect.midY-size.height/2), withAttributes: attrs)
         }
         button("Cancel", cancelRect, .darkGray)
-        button("Start Recording", confirmRect, valid ? .systemBlue : .darkGray)
+        button("Start Recording", confirmRect, valid ? .systemRed : .darkGray)
         let message = valid ? "\(Int(selection.width)) × \(Int(selection.height)) pt · Drag edges to resize · Return to record" : "Drag to select an area · Esc to cancel"
         let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: NSColor.white, .backgroundColor: NSColor.black.withAlphaComponent(0.75)]
         let text = message as NSString; let size = text.size(withAttributes: attrs)

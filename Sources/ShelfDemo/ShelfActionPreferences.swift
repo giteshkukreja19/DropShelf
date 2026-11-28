@@ -5,9 +5,9 @@ import SwiftUI
 enum ShelfActionPreferences {
     static let groups: [(String, [String])] = [
         ("General Actions", ["Get Info", "Rename…", "Batch Rename…", "Create ZIP Archive…", "Copy Path", "Copy to…", "Move to…", "Move to Trash", "Duplicate"]),
-        ("Video Actions", ["Trim Video…"]),
-        ("Image Actions", ["Resize Images…", "Convert Image Format…", "Compress Images…", "Remove Image Metadata", "Stitch Images…", "Create PDF…"]),
-        ("Document Actions", ["Merge PDFs…", "Split PDF into Pages…", "Extract / Reorder PDF Pages…", "Delete PDF Pages…", "Compress PDF…", "Password Protect PDF…", "Convert PDF to Word (.docx)…", "Convert Word to PDF…", "Create Combined PDF…", "Merge Word Documents…", "Rotate PDF Pages 90°…", "Extract PDF Text…", "Extract Word Text…"])
+        ("Video Actions", ["Trim Video…", "Remove Silent Parts…"]),
+        ("Image Actions", ["Resize Images…", "Convert Image Format…", "Compress Images…", "Remove Image Metadata", "Stitch Images…", "Create PDF…", "Enhance Image Quality…", "Remove Background…"]),
+        ("Document Actions", ["Merge PDFs…", "Split PDF into Pages…", "Extract / Reorder PDF Pages…", "Delete PDF Pages…", "Compress PDF…", "Password Protect PDF…", "Convert PDF to Word (.docx)…", "Convert Word to PDF…", "Create Combined PDF…", "Merge Word Documents…", "Rotate PDF Pages 90°…", "Extract PDF Text…", "Extract Word Text…", "Convert Document to PDF…", "Export Slides as PNG…", "Extract Presentation Text…", "Extract Embedded Images…", "Convert Presentation to ODP…", "Convert Document to TXT…", "Convert Document to RTF…", "Convert First Worksheet to CSV…", "Convert CSV to JSON…", "Convert Spreadsheet to XLSX…", "Convert Document to DOCX…", "Convert Presentation to PPTX…"])
     ]
     static func key(_ name: String) -> String { "shelf.actionPlacement." + name }
     static func defaultValue(_ name: String) -> String {
@@ -66,7 +66,7 @@ struct ShelfActionPreferencesView: View {
                             }
                         }.background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
                     }
-                }.id(revision == -1 ? 1 : 0)
+                }.id(revision)
             }
             HStack {
                 Button("Restore Defaults") {
